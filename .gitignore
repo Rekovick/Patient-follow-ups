@@ -3,3 +3,4 @@ node_modules/
 .clasp.json
 dev/screenshots/
 dev/demo.html
+dev/setup-guide.html

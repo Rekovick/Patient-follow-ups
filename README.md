@@ -132,6 +132,7 @@ so you can try changes without deploying:
 node dev/build-preview.js          # writes dev/preview.html (with sample patients); open it in a browser
 node dev/build-preview.js --empty  # start with no patients
 node dev/build-preview.js --artifact  # dev/demo.html, shaped for the hosted demo page
+node dev/build-setup-guide.js       # dev/setup-guide.html: install steps with copy buttons for each file
 node dev/smoke-test.js             # end-to-end test in headless Chromium (needs Playwright)
 ```
 
