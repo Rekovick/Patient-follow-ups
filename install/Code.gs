@@ -74,10 +74,7 @@ function doGet() {
     : HtmlService.createTemplateFromFile('Index').evaluate();
   return page
     .setTitle(APP_TITLE)
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1, viewport-fit=cover')
-    .addMetaTag('mobile-web-app-capable', 'yes')
-    .addMetaTag('apple-mobile-web-app-capable', 'yes')
-    .addMetaTag('apple-mobile-web-app-title', APP_TITLE);
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1, viewport-fit=cover');
 }
 
 function include(name) {
