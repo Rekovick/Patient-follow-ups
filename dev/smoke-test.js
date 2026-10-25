@@ -99,7 +99,14 @@ function assert(cond, msg) {
   await page.waitForFunction(() => !document.querySelector('.busy'));
 
   console.log('Patient page');
-  assert(await page.locator('.photo img').count() === 3, 'decision + 2 pre-op photos uploaded');
+  assert(await page.locator('#upload-bar:not([hidden])').count() === 1, 'patient page opens at once while photos upload in the background');
+  await page.waitForFunction(() => document.querySelectorAll('.photo img').length === 3 && document.getElementById('upload-bar').hidden, null, { timeout: 8000 });
+  assert(true, 'decision + 2 pre-op photos uploaded');
+  const folders = await page.evaluate(() => {
+    const db = fakeGas.db();
+    return Object.values(db.files).filter(f => f.folder && /^Test Patient \(/.test(f.name)).length;
+  });
+  assert(folders === 1, 'parallel uploads created exactly one Drive folder');
   assert((await page.locator('.hero .hint').textContent()).includes('cardiology'), 'hint shown');
   assert(await page.locator('input[data-anes-item]:checked').count() === 2, 'anesthesia ticks saved');
   await shot('07-patient');
@@ -109,8 +116,9 @@ function assert(cond, msg) {
   await page.click('.chip[data-act="set-status"][data-value="Done"]');
   await page.waitForTimeout(700);
   assert(await page.locator('h2:has-text("Post-op photos")').count() === 1, 'post-op section unlocked when Done');
-  await page.setInputFiles('input[data-photo-kind="postop"][multiple]', { name: 'post.png', mimeType: 'image/png', buffer: PNG });
-  await page.waitForFunction(() => document.querySelectorAll('.photo img').length === 4, null, { timeout: 5000 });
+  await page.setInputFiles('input[data-photo-kind="postop"][multiple]', ['p1', 'p2', 'p3', 'p4'].map(n => ({ name: n + '.png', mimeType: 'image/png', buffer: PNG })));
+  await page.waitForFunction(() => document.querySelectorAll('.photo img').length === 7, null, { timeout: 8000 });
+  assert(await page.evaluate(() => getPatients_().find(x => x.name === 'Test Patient').photos.postop.length) === 4, 'four post-op photos uploaded side by side, none lost');
   await page.fill('#note-text', 'Wound clean, follow up in 1 week');
   await page.click('[data-act="add-note"]');
   await page.waitForSelector('.note');
@@ -142,7 +150,7 @@ function assert(cond, msg) {
   });
   assert(sheetRow.phone === '01055554444', 'phone stored with leading zero');
   assert(sheetRow.status === 'Done' && sheetRow.cls === 'Trauma', 'status + classification stored');
-  assert(sheetRow.photos === 4 && sheetRow.items === 3, 'photos + anesthesia stored');
+  assert(sheetRow.photos === 7 && sheetRow.items === 3, 'photos + anesthesia stored');
 
   console.log('Settings');
   await page.click('[data-act="settings"]');

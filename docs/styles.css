@@ -407,3 +407,14 @@
   /* ---------- Connect / QR ---------- */
   .qr { display: grid; place-items: center; margin-top: 12px; }
   .qr svg { width: min(240px, 70vw); height: auto; aspect-ratio: 1; background: #fff; border-radius: 12px; padding: 6px; }
+
+  /* ---------- Background uploads ---------- */
+  #upload-bar {
+    position: fixed; left: 50%; transform: translateX(-50%); z-index: 40;
+    top: calc(env(safe-area-inset-top, 0px) + 64px);
+    display: flex; align-items: center; gap: 8px; max-width: calc(100vw - 32px);
+    padding: 8px 14px; border-radius: 999px; font-size: 13px; font-weight: 600;
+    background: var(--primary); color: var(--primary-ink); box-shadow: var(--shadow);
+  }
+  #upload-bar[hidden] { display: none; }
+  #upload-bar .spinner { border-color: color-mix(in srgb, var(--primary-ink) 35%, transparent); border-top-color: var(--primary-ink); }

@@ -474,7 +474,7 @@
     for (const file of Array.from(files || [])) {
       try {
         const r = await readImage(file);
-        out.push({ dataUrl: toJpeg(r.img, 1800, 0.84), thumb: toJpeg(r.img, 360, 0.72) });
+        out.push({ dataUrl: toJpeg(r.img, 1600, 0.8), thumb: toJpeg(r.img, 320, 0.7) });
         URL.revokeObjectURL(r.url);
       } catch (e) {
         toast(errMsg(e), 'error');
@@ -891,17 +891,12 @@
       return;
     }
     upsert(p);
-    const uploads = d.decision.map(x => ['decision', x]).concat(d.preop.map(x => ['preop', x]));
-    let failed = 0;
-    for (let i = 0; i < uploads.length; i++) {
-      busy('Uploading photo ' + (i + 1) + ' of ' + uploads.length + '…');
-      try { p = await uploadOne(p.id, uploads[i][0], uploads[i][1]); } catch (e) { failed++; }
-    }
+    const uploads = d.decision.map(ph => ({ kind: 'decision', ph: ph })).concat(d.preop.map(ph => ({ kind: 'preop', ph: ph })));
     S.draft = null;
     busy(false);
     navigate({ view: 'patient', id: p.id }, { replace: true });
-    if (failed) toast('Saved, but ' + failed + ' photo(s) failed to upload. Please add them again.', 'error');
-    else toast('Patient saved');
+    toast(uploads.length ? 'Patient saved. Uploading photos…' : 'Patient saved');
+    if (uploads.length) reportUploads(await uploadPhotos(p.id, uploads), uploads.length);
   }
 
   // =========================================================================
@@ -1058,26 +1053,80 @@
 
   async function uploadOne(id, kind, ph) {
     const p = await call('uploadPhoto', id, kind, { dataUrl: ph.dataUrl, thumbDataUrl: ph.thumb });
+    // The server adds the photo and replies under one lock, so the last photo in this reply is ours.
     const list = p.photos[kind];
     const added = list[list.length - 1];
     if (added) S.thumbs[added.thumbId || added.id] = ph.thumb;
-    upsert(p);
+    // Uploads run side by side: never let an older reply replace a newer one.
+    const cur = getP(id);
+    if (!cur || String(p.updatedAt) >= String(cur.updatedAt)) upsert(p);
     return p;
+  }
+
+  const UPLOAD_CONCURRENCY = 3;
+
+  /** Uploads [{kind, ph}] a few at a time in the background. Returns the number that failed. */
+  async function uploadPhotos(id, uploads) {
+    uploads.forEach(u => { S.pending[id + ':' + u.kind] = (S.pending[id + ':' + u.kind] || 0) + 1; });
+    updateUploadBar();
+    if (S.route.view === 'patient' && S.route.id === id) rerender();
+    let next = 0;
+    let failed = 0;
+    async function uploadNext() {
+      const u = uploads[next++];
+      try {
+        await uploadOne(id, u.kind, u.ph);
+      } catch (e) {
+        failed++;
+        S.uploadError = errMsg(e);
+      }
+      S.pending[id + ':' + u.kind]--;
+      updateUploadBar();
+      if (S.route.view === 'patient' && S.route.id === id) rerender();
+    }
+    async function worker() {
+      while (next < uploads.length) await uploadNext();
+    }
+    // A patient's first photo creates their Drive folder, so it goes alone; the rest share that folder.
+    const p = getP(id);
+    if (!p || !p.folderId) await uploadNext();
+    const workers = [];
+    for (let i = 0; i < UPLOAD_CONCURRENCY; i++) workers.push(worker());
+    await Promise.all(workers);
+    return failed;
+  }
+
+  function reportUploads(failed, total) {
+    if (!failed) toast(total + ' photo' + (total > 1 ? 's' : '') + ' uploaded');
+    else toast(failed + ' of ' + total + ' photo' + (total > 1 ? 's' : '') + ' failed to upload (' + S.uploadError + '). Please add them again.', 'error');
+  }
+
+  function pendingUploads() {
+    return Object.keys(S.pending).reduce((n, k) => n + Math.max(0, S.pending[k]), 0);
+  }
+
+  function updateUploadBar() {
+    let bar = document.getElementById('upload-bar');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'upload-bar';
+      bar.setAttribute('role', 'status');
+      document.body.appendChild(bar);
+    }
+    const n = pendingUploads();
+    bar.hidden = !n;
+    bar.innerHTML = n ? '<div class="spinner sm"></div>Uploading ' + n + ' photo' + (n > 1 ? 's' : '') + '… keep the app open' : '';
   }
 
   async function addPhotos(id, kind, files) {
     const key = id + ':' + kind;
+    // Show placeholders right away while the photos are being resized.
     S.pending[key] = (S.pending[key] || 0) + files.length;
     rerender();
     const items = await processFiles(files);
-    S.pending[key] -= files.length - items.length;
-    let ok = 0;
-    for (const ph of items) {
-      try { await uploadOne(id, kind, ph); ok++; } catch (e) { toast('Upload failed: ' + errMsg(e), 'error'); }
-      S.pending[key]--;
-      rerender();
-    }
-    if (ok) toast(ok + ' photo' + (ok > 1 ? 's' : '') + ' added');
+    S.pending[key] -= files.length;
+    if (!items.length) { rerender(); return; }
+    reportUploads(await uploadPhotos(id, items.map(ph => ({ kind: kind, ph: ph }))), items.length);
   }
 
   async function setStatus(p, status) {
@@ -1888,6 +1937,11 @@
   function init() {
     loadPrefs();
     window.addEventListener('popstate', onHistoryChange);
+    window.addEventListener('beforeunload', e => {
+      if (!pendingUploads()) return;
+      e.preventDefault();
+      e.returnValue = '';
+    });
     window.addEventListener('hashchange', () => {
       const link = parseConnectHash();
       if (!link) return;
