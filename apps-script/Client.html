@@ -917,7 +917,7 @@
       historyPanel(p) +
 
       '<section class="panel"><h2>' + icon('share') + 'More</h2><div class="actions-grid">' +
-        '<button class="btn" data-act="share-summary">' + icon('share') + 'Share</button>' +
+        '<a class="btn" href="' + esc('https://wa.me/?text=' + encodeURIComponent(summaryText(p))) + '" target="_blank" rel="noopener">' + icon('share') + 'Share</a>' +
         (p.folderId ? '<a class="btn" href="https://drive.google.com/drive/folders/' + esc(p.folderId) + '" target="_blank" rel="noopener">' + icon('folder') + 'Drive folder</a>' : '<button class="btn" disabled>' + icon('folder') + 'No photos yet</button>') +
         '<button class="btn" data-act="archive">' + icon('archive') + (p.archived ? 'Unarchive' : 'Archive') + '</button>' +
         '<button class="btn danger" data-act="delete-patient">' + icon('trash') + 'Delete</button>' +
@@ -1400,10 +1400,6 @@
       }
     },
     'templates': () => openTemplates(getP(S.route.id)),
-    'share-summary': () => {
-      const p = getP(S.route.id);
-      window.open('https://wa.me/?text=' + encodeURIComponent(summaryText(p)), '_blank', 'noopener');
-    },
     'add-note': async () => {
       const ta = document.getElementById('note-text');
       const text = ta.value.trim();
