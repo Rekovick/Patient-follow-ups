@@ -1,0 +1,1649 @@
+<script>
+(function () {
+  'use strict';
+
+  // =========================================================================
+  // Server bridge
+  // =========================================================================
+
+  function call(fn) {
+    const args = Array.prototype.slice.call(arguments, 1);
+    return new Promise((resolve, reject) => {
+      const runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);
+      runner[fn].apply(runner, args);
+    });
+  }
+
+  // =========================================================================
+  // State
+  // =========================================================================
+
+  const app = document.getElementById('app');
+  const overlayRoot = document.getElementById('overlay-root');
+  const PREFS_KEY = 'surgery-followups.prefs.v1';
+
+  const S = {
+    user: '',
+    lists: null,
+    patients: [],
+    doneStatus: 'Done',
+    spreadsheetUrl: '',
+    folderUrl: '',
+    loadedAt: 0,
+    refreshing: false,
+    filters: { q: '', status: '', hospital: '', consultant: '', classification: '', upcoming: false, archived: false },
+    sort: 'updated',
+    route: { view: 'home' },
+    depth: 0,
+    draft: null,
+    settingsDraft: null,
+    thumbs: {},
+    thumbLoading: {},
+    full: {},
+    fullOrder: [],
+    pending: {},
+    chains: {},
+    queued: {},
+    viewer: null,
+  };
+
+  const SORTS = {
+    updated: 'Recently updated',
+    created: 'Newest first',
+    waiting: 'Waiting longest',
+    surgery: 'Surgery date',
+    name: 'Name A–Z',
+  };
+
+  const KIND_LABEL = { decision: 'Decision', preop: 'Pre-op', postop: 'Post-op' };
+  const ASA = ['', 'ASA I', 'ASA II', 'ASA III', 'ASA IV', 'ASA V', 'Emergency (E)'];
+  const FITNESS = ['Pending', 'Fit', 'Fit — high risk', 'Unfit', 'Needs more investigations'];
+
+  const LIST_META = [
+    { key: 'hospitals', title: 'Hospitals', icon: 'hospital' },
+    { key: 'consultants', title: 'Consultants', icon: 'doctor' },
+    { key: 'classifications', title: 'Classifications', icon: 'tag' },
+    { key: 'statuses', title: 'Statuses', icon: 'flag', help: '“Done” unlocks post-op photos and notes, so it cannot be removed.' },
+    { key: 'anesthesiaItems', title: 'Anesthesia checklist', icon: 'syringe' },
+    { key: 'templates', title: 'WhatsApp templates', icon: 'message', help: 'Placeholders: {name} {date} {hospital} {consultant} {status}', long: true },
+  ];
+
+  function loadPrefs() {
+    try {
+      const p = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
+      if (p.filters) Object.assign(S.filters, p.filters, { q: '' });
+      if (p.sort && SORTS[p.sort]) S.sort = p.sort;
+    } catch (e) { /* storage unavailable */ }
+  }
+
+  function savePrefs() {
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify({ filters: Object.assign({}, S.filters, { q: '' }), sort: S.sort }));
+    } catch (e) { /* storage unavailable */ }
+  }
+
+  // =========================================================================
+  // Icons
+  // =========================================================================
+
+  const ICONS = {
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+    x: '<path d="M18 6 6 18M6 6l12 12"/>',
+    back: '<path d="m15 18-6-6 6-6"/>',
+    chev: '<path d="m9 18 6-6-6-6"/>',
+    left: '<path d="m15 18-6-6 6-6"/>',
+    right: '<path d="m9 18 6-6-6-6"/>',
+    phone: '<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 1.9.7 2.8a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.9.6 2.8.7a2 2 0 0 1 1.7 2z"/>',
+    refresh: '<path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/>',
+    settings: '<path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/>',
+    edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+    camera: '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>',
+    image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>',
+    hospital: '<path d="M3 21h18M5 21V7l7-4 7 4v14M10 9h4M12 7v4M9 21v-4h6v4"/>',
+    doctor: '<circle cx="12" cy="7" r="4"/><path d="M5.5 21a6.5 6.5 0 0 1 13 0"/>',
+    calendar: '<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    syringe: '<path d="m18 2 4 4M17 7l3-3M19 9 8.7 19.3a2.4 2.4 0 0 1-3.4 0l-.6-.6a2.4 2.4 0 0 1 0-3.4L15 5M9 11l4 4M5 19l-3 3M14 4l6 6"/>',
+    tag: '<path d="M20.6 13.4 13.4 20.6a2 2 0 0 1-2.8 0L2 12V2h10l8.6 8.6a2 2 0 0 1 0 2.8z"/><circle cx="7" cy="7" r="1.5"/>',
+    note: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/>',
+    info: '<circle cx="12" cy="12" r="9"/><path d="M12 16v-4M12 8h.01"/>',
+    history: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l4 2"/>',
+    trash: '<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>',
+    archive: '<rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8M10 12h4"/>',
+    folder: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
+    sheet: '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18"/>',
+    share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/>',
+    up: '<path d="m18 15-6-6-6 6"/>',
+    down: '<path d="m6 9 6 6 6-6"/>',
+    check: '<path d="M20 6 9 17l-5-5"/>',
+    flag: '<path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1zM4 22v-7"/>',
+    pulse: '<path d="M22 12h-4l-3 9L9 3l-3 9H2"/>',
+    send: '<path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/>',
+    external: '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14 21 3"/>',
+    message: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+    users: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.9M16 3.1a4 4 0 0 1 0 7.8"/>',
+    lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  };
+  const WA_PATH = 'M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2.05 22l5.25-1.38a9.9 9.9 0 0 0 4.74 1.21c5.46 0 9.91-4.45 9.91-9.91S17.5 2 12.04 2zm5.8 14.03c-.25.69-1.44 1.32-1.98 1.4-.51.08-1.15.11-1.86-.12-.43-.14-.98-.32-1.68-.62-2.96-1.28-4.89-4.26-5.04-4.46-.15-.2-1.2-1.6-1.2-3.05s.76-2.16 1.03-2.46c.27-.3.59-.37.79-.37h.57c.18 0 .43-.07.67.51.25.59.84 2.05.91 2.2.07.15.12.32.02.52-.1.2-.15.32-.3.49-.15.17-.31.39-.45.52-.15.15-.3.31-.13.61.17.3.77 1.27 1.65 2.06 1.13 1.01 2.09 1.32 2.39 1.47.3.15.47.12.64-.07.17-.2.74-.86.94-1.16.2-.3.39-.25.66-.15.27.1 1.72.81 2.02.96.3.15.49.22.57.35.07.12.07.71-.18 1.4z';
+
+  function icon(name) {
+    if (name === 'whatsapp') return '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="' + WA_PATH + '"/></svg>';
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (ICONS[name] || '') + '</svg>';
+  }
+
+  // =========================================================================
+  // Text, phone and date helpers
+  // =========================================================================
+
+  function esc(s) {
+    return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  function errMsg(e) {
+    return (e && e.message) || String(e || 'Something went wrong');
+  }
+
+  function clone(o) {
+    return JSON.parse(JSON.stringify(o));
+  }
+
+  /** Arabic-Indic digits (٠١٢…) → 0-9, so numbers typed on an Arabic keyboard still work. */
+  function latinDigits(s) {
+    return String(s === null || s === undefined ? '' : s)
+      .replace(/[٠-٩]/g, d => String(d.charCodeAt(0) - 0x0660))
+      .replace(/[۰-۹]/g, d => String(d.charCodeAt(0) - 0x06F0));
+  }
+
+  /** Lower-case and fold Arabic letter variants so "أحمد" matches "احمد". */
+  function normText(s) {
+    return latinDigits(s).toLowerCase()
+      .replace(/[ً-ْـ]/g, '')
+      .replace(/[أإآ]/g, 'ا')
+      .replace(/ة/g, 'ه')
+      .replace(/ى/g, 'ي');
+  }
+
+  /** Normalises any way of writing an Egyptian number to the local form, e.g. +20 10… → 010… */
+  function localPhone(p) {
+    let d = latinDigits(p).replace(/\D/g, '');
+    if (d.indexOf('00') === 0) d = d.slice(2);
+    if (d.indexOf('20') === 0 && d.length === 12) d = '0' + d.slice(2);
+    if (d.length === 10 && d.charAt(0) === '1') d = '0' + d;
+    return d;
+  }
+
+  /** International form used for calls and WhatsApp: "2" + local number (010… → 2010… = +20 10…). */
+  function intlPhone(p) {
+    const d = localPhone(p);
+    if (!d) return '';
+    return d.charAt(0) === '0' ? '2' + d : '20' + d;
+  }
+
+  function telHref(p) {
+    return 'tel:+' + intlPhone(p);
+  }
+
+  function waHref(p, text) {
+    return 'https://wa.me/' + intlPhone(p) + (text ? '?text=' + encodeURIComponent(text) : '');
+  }
+
+  function prettyPhone(p) {
+    const d = localPhone(p);
+    return /^0\d{10}$/.test(d) ? d.replace(/^(\d{3})(\d{4})(\d{4})$/, '$1 $2 $3') : (d || String(p || ''));
+  }
+
+  function validMobile(p) {
+    return /^01[0125]\d{8}$/.test(localPhone(p));
+  }
+
+  function pad(n) {
+    return (n < 10 ? '0' : '') + n;
+  }
+
+  function ymd(d) {
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  }
+
+  function today() {
+    return ymd(new Date());
+  }
+
+  function dayDiff(from, to) {
+    return Math.round((Date.parse(to + 'T00:00:00') - Date.parse(from + 'T00:00:00')) / 864e5);
+  }
+
+  function fmtDay(s) {
+    if (!s) return '';
+    const d = new Date(s + 'T00:00:00');
+    if (isNaN(d)) return s;
+    const opts = { weekday: 'short', day: 'numeric', month: 'short' };
+    if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+    return d.toLocaleDateString('en-GB', opts);
+  }
+
+  function relDay(s) {
+    const n = dayDiff(today(), s);
+    if (isNaN(n)) return '';
+    if (n === 0) return 'today';
+    if (n === 1) return 'tomorrow';
+    if (n === -1) return 'yesterday';
+    return n > 0 ? 'in ' + n + ' days' : -n + ' days ago';
+  }
+
+  function fmtDateTime(iso) {
+    const d = new Date(iso);
+    if (isNaN(d)) return '';
+    return d.toLocaleString('en-GB', { day: 'numeric', month: 'short', year: d.getFullYear() !== new Date().getFullYear() ? 'numeric' : undefined, hour: '2-digit', minute: '2-digit' });
+  }
+
+  function ago(iso) {
+    const s = (Date.now() - Date.parse(iso)) / 1000;
+    if (isNaN(s)) return '';
+    if (s < 60) return 'just now';
+    if (s < 3600) return Math.floor(s / 60) + ' min ago';
+    if (s < 86400) return Math.floor(s / 3600) + ' h ago';
+    if (s < 86400 * 30) return Math.floor(s / 86400) + ' d ago';
+    return fmtDateTime(iso);
+  }
+
+  function daysSince(iso) {
+    const t = Date.parse(iso);
+    return isNaN(t) ? 0 : Math.floor((Date.now() - t) / 864e5);
+  }
+
+  function who(email) {
+    if (!email) return '';
+    return email === S.user ? 'you' : email.split('@')[0];
+  }
+
+  function uniq(list) {
+    const seen = {};
+    return list.filter(v => v && !seen[v] && (seen[v] = true));
+  }
+
+  // =========================================================================
+  // Domain helpers
+  // =========================================================================
+
+  const KNOWN_TONES = {
+    'waiting for paperwork': 'amber', 'waiting for labs': 'blue', 'ready for surgery': 'violet',
+    'done': 'green', 'postponed': 'orange', 'cancelled': 'rose', 'canceled': 'rose',
+  };
+  const PALETTE = ['teal', 'rose', 'orange', 'slate', 'amber', 'blue', 'violet'];
+
+  function tone(status) {
+    const k = String(status || '').toLowerCase().trim();
+    if (KNOWN_TONES[k]) return KNOWN_TONES[k];
+    let h = 0;
+    for (let i = 0; i < k.length; i++) h = (h * 31 + k.charCodeAt(i)) >>> 0;
+    return PALETTE[h % PALETTE.length];
+  }
+
+  function isDone(p) {
+    return p.status === S.doneStatus;
+  }
+
+  function getP(id) {
+    return S.patients.find(p => p.id === id);
+  }
+
+  function upsert(p) {
+    const i = S.patients.findIndex(x => x.id === p.id);
+    if (i >= 0) S.patients[i] = p;
+    else S.patients.push(p);
+  }
+
+  function anesItems(a) {
+    const base = S.lists.anesthesiaItems.slice();
+    Object.keys((a && a.items) || {}).forEach(k => { if (base.indexOf(k) < 0) base.push(k); });
+    return base;
+  }
+
+  function anesStats(a) {
+    const items = anesItems(a);
+    const done = items.filter(i => a.items[i]).length;
+    return { items: items, done: done, total: items.length, pct: items.length ? Math.round(done * 100 / items.length) : 0 };
+  }
+
+  function haystack(p) {
+    return normText([
+      p.name, p.phone, localPhone(p.phone), p.hint, p.procedure, p.hospital, p.consultant,
+      p.classification, p.status, p.id, p.anesthesia.notes,
+    ].concat(p.notes.map(n => n.text)).join(' \u0001 '));
+  }
+
+  function matches(p, f, opts) {
+    opts = opts || {};
+    if (p.archived && !f.archived) return false;
+    if (f.hospital && p.hospital !== f.hospital) return false;
+    if (f.consultant && p.consultant !== f.consultant) return false;
+    if (f.classification && p.classification !== f.classification) return false;
+    if (!opts.ignoreStatus) {
+      if (f.status && p.status !== f.status) return false;
+      if (f.upcoming && !isUpcoming(p)) return false;
+    }
+    if (f.q) {
+      const q = normText(f.q).trim();
+      const digits = q.replace(/[\s+\-()]/g, '');
+      if (/^\d{4,}$/.test(digits) && p.phone) {
+        const compact = q.replace(/[\s\-()]/g, '');
+        const local = /^(\+|00)20/.test(compact) ? compact.replace(/^(\+|00)20/, '') : digits.replace(/^0/, '');
+        if (localPhone(p.phone).indexOf(local) >= 0) return true;
+      }
+      const hay = haystack(p);
+      return q.split(/\s+/).every(w => hay.indexOf(w) >= 0);
+    }
+    return true;
+  }
+
+  function isUpcoming(p) {
+    if (!p.surgeryDate || isDone(p)) return false;
+    const n = dayDiff(today(), p.surgeryDate);
+    return n >= 0 && n <= 7;
+  }
+
+  function sortPatients(list) {
+    const by = {
+      updated: (a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)),
+      created: (a, b) => String(b.createdAt).localeCompare(String(a.createdAt)),
+      waiting: (a, b) => (isDone(a) - isDone(b)) || String(a.createdAt).localeCompare(String(b.createdAt)),
+      surgery: (a, b) => (a.surgeryDate ? 0 : 1) - (b.surgeryDate ? 0 : 1) || String(a.surgeryDate).localeCompare(String(b.surgeryDate)),
+      name: (a, b) => String(a.name).localeCompare(String(b.name)),
+    }[S.sort] || (() => 0);
+    return list.slice().sort(by);
+  }
+
+  function fillTemplate(t, p) {
+    return String(t)
+      .replace(/\{name\}/g, p.name || '')
+      .replace(/\{date\}/g, p.surgeryDate ? fmtDay(p.surgeryDate) : '…')
+      .replace(/\{hospital\}/g, p.hospital || '')
+      .replace(/\{consultant\}/g, p.consultant || '')
+      .replace(/\{status\}/g, p.status || '');
+  }
+
+  function summaryText(p) {
+    const st = anesStats(p.anesthesia);
+    const lines = ['*' + p.name + '*', 'Status: ' + p.status, 'Hospital: ' + p.hospital + ' — ' + p.consultant];
+    if (p.classification) lines.push('Classification: ' + p.classification);
+    if (p.procedure) lines.push('Procedure: ' + p.procedure);
+    if (p.age) lines.push('Age: ' + p.age);
+    if (p.phone) lines.push('Phone: ' + prettyPhone(p.phone));
+    if (p.surgeryDate) lines.push('Surgery: ' + fmtDay(p.surgeryDate));
+    lines.push('Anesthesia: ' + st.done + '/' + st.total + ' ready' +
+      (p.anesthesia.asa ? ', ' + p.anesthesia.asa : '') + ', ' + p.anesthesia.fitness);
+    const missing = st.items.filter(i => !p.anesthesia.items[i]);
+    if (missing.length && !isDone(p)) lines.push('Pending: ' + missing.join(', '));
+    if (p.hint) lines.push('Note: ' + p.hint);
+    return lines.join('\n');
+  }
+
+  function phoneWarning(phone, excludeId) {
+    if (!phone) return '';
+    const out = [];
+    const local = localPhone(phone);
+    if (!validMobile(phone)) out.push('This doesn’t look like an Egyptian mobile number (11 digits starting with 010, 011, 012 or 015).');
+    const dup = S.patients.find(p => p.id !== excludeId && p.phone && localPhone(p.phone) === local);
+    if (dup) out.push('Already saved for <a href="#" data-act="open" data-id="' + esc(dup.id) + '">' + esc(dup.name) + '</a> (' + esc(dup.status) + ').');
+    return out.map(t => '<div class="warn">' + t + '</div>').join('');
+  }
+
+  // =========================================================================
+  // Images
+  // =========================================================================
+
+  function readImage(file) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => resolve({ img: img, url: url });
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not read "' + file.name + '". Try a JPG or PNG photo.')); };
+      img.src = url;
+    });
+  }
+
+  function toJpeg(img, max, quality) {
+    const w = img.naturalWidth;
+    const h = img.naturalHeight;
+    const scale = Math.min(1, max / Math.max(w, h));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', quality);
+  }
+
+  /** Resizes photos before upload: fast on mobile data and keeps Drive tidy. */
+  async function processFiles(files) {
+    const out = [];
+    for (const file of Array.from(files || [])) {
+      try {
+        const r = await readImage(file);
+        out.push({ dataUrl: toJpeg(r.img, 1800, 0.84), thumb: toJpeg(r.img, 360, 0.72) });
+        URL.revokeObjectURL(r.url);
+      } catch (e) {
+        toast(errMsg(e), 'error');
+      }
+    }
+    return out;
+  }
+
+  function hydrateThumbs() {
+    const need = [];
+    document.querySelectorAll('img[data-fid]').forEach(img => {
+      const id = img.dataset.fid;
+      if (S.thumbs[id]) {
+        if (img.getAttribute('src') !== S.thumbs[id]) img.src = S.thumbs[id];
+      } else if (!S.thumbLoading[id] && need.indexOf(id) < 0) {
+        need.push(id);
+      }
+    });
+    for (let i = 0; i < need.length; i += 12) {
+      const chunk = need.slice(i, i + 12);
+      chunk.forEach(id => { S.thumbLoading[id] = true; });
+      call('getPhotoData', chunk).then(map => {
+        chunk.forEach(id => {
+          S.thumbs[id] = map[id] || BROKEN_IMG;
+          document.querySelectorAll('img[data-fid="' + id + '"]').forEach(img => { img.src = S.thumbs[id]; });
+        });
+      }).catch(() => { /* retried on next render */ }).then(() => {
+        chunk.forEach(id => { delete S.thumbLoading[id]; });
+      });
+    }
+  }
+
+  const BROKEN_IMG = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#9aa6b1" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="m3 3 18 18"/></svg>');
+
+  function cacheFull(id, data) {
+    S.full[id] = data;
+    S.fullOrder.push(id);
+    while (S.fullOrder.length > 12) delete S.full[S.fullOrder.shift()];
+  }
+
+  // =========================================================================
+  // Routing
+  // =========================================================================
+
+  function navigate(route, opts) {
+    opts = opts || {};
+    S.route = route;
+    try {
+      if (opts.replace) google.script.history.replace(route, {}, '');
+      else { google.script.history.push(route, {}, ''); S.depth++; }
+    } catch (e) { /* history not available */ }
+    closeOverlays();
+    render();
+    window.scrollTo(0, 0);
+    const af = app.querySelector('[data-autofocus]');
+    if (af) af.focus();
+  }
+
+  function parentRoute(r) {
+    if (r.view === 'edit') return { view: 'patient', id: r.id };
+    if (r.view === 'new' && r.step > 0) return { view: 'new', step: r.step - 1 };
+    return { view: 'home' };
+  }
+
+  function goBack() {
+    const before = JSON.stringify(S.route);
+    const target = parentRoute(S.route);
+    if (S.depth > 0) {
+      try { window.history.back(); } catch (e) { /* ignore */ }
+      setTimeout(() => {
+        if (JSON.stringify(S.route) === before) navigate(target, { replace: true });
+      }, 450);
+    } else {
+      navigate(target, { replace: true });
+    }
+  }
+
+  function onHistoryChange(e) {
+    S.depth = Math.max(0, S.depth - 1);
+    S.route = (e && e.state && e.state.view) ? e.state : { view: 'home' };
+    closeOverlays();
+    render();
+  }
+
+  function render() {
+    if (!S.lists) return;
+    const r = S.route;
+    if (r.view === 'patient') renderPatient(r.id);
+    else if (r.view === 'edit') renderEdit(r.id);
+    else if (r.view === 'new') renderWizard();
+    else if (r.view === 'settings') renderSettings();
+    else renderHome();
+    hydrateThumbs();
+  }
+
+  /** Re-renders the current view while keeping scroll position and any half-typed text. */
+  function rerender() {
+    const y = window.scrollY;
+    const keep = {};
+    let focusKey = null;
+    let sel = null;
+    app.querySelectorAll('[data-keep]').forEach(el => { keep[el.dataset.keep] = el.value; });
+    const ae = document.activeElement;
+    if (ae && ae.dataset && ae.dataset.keep) {
+      focusKey = ae.dataset.keep;
+      try { sel = [ae.selectionStart, ae.selectionEnd]; } catch (e) { sel = null; }
+    }
+    render();
+    app.querySelectorAll('[data-keep]').forEach(el => {
+      if (keep[el.dataset.keep] !== undefined) el.value = keep[el.dataset.keep];
+      if (el.dataset.keep === focusKey) {
+        el.focus({ preventScroll: true });
+        if (sel) try { el.setSelectionRange(sel[0], sel[1]); } catch (e) { /* not a text input */ }
+      }
+    });
+    window.scrollTo(0, y);
+  }
+
+  function topbar(title, sub, right) {
+    return '<header class="topbar">' +
+      '<button class="icon-btn" data-act="back" aria-label="Back">' + icon('back') + '</button>' +
+      '<h1 dir="auto">' + esc(title) + (sub ? '<span class="sub">' + esc(sub) + '</span>' : '') + '</h1>' +
+      (right || '') + '</header>';
+  }
+
+  // =========================================================================
+  // Home
+  // =========================================================================
+
+  function filterSelect(key, label, values) {
+    const v = S.filters[key];
+    const all = uniq(values.concat(S.patients.map(p => p[key])));
+    return '<select data-filter="' + key + '" class="' + (v ? 'set' : '') + '" aria-label="' + esc(label) + '">' +
+      '<option value="">' + esc(label) + '</option>' +
+      all.map(x => '<option' + (x === v ? ' selected' : '') + '>' + esc(x) + '</option>').join('') +
+      '</select>';
+  }
+
+  function renderHome() {
+    const f = S.filters;
+    const L = S.lists;
+    app.innerHTML =
+      '<header class="topbar">' +
+        '<div class="brand-dot">' + icon('pulse') + '</div>' +
+        '<h1>Surgery Follow-ups<span class="sub" id="sync-line"></span></h1>' +
+        '<button class="icon-btn' + (S.refreshing ? ' spinning' : '') + '" data-act="refresh" aria-label="Refresh">' + icon('refresh') + '</button>' +
+        '<button class="icon-btn" data-act="settings" aria-label="Settings">' + icon('settings') + '</button>' +
+      '</header>' +
+      '<div class="search">' + icon('search') +
+        '<input id="q" data-keep="q" type="search" placeholder="Search name, phone, hint, notes…" value="' + esc(f.q) + '" autocomplete="off" dir="auto">' +
+        '<button class="icon-btn clear' + (f.q ? '' : ' hidden') + '" data-act="clear-q" aria-label="Clear search">' + icon('x') + '</button>' +
+      '</div>' +
+      '<div class="chips" id="chips"></div>' +
+      '<div class="filters">' +
+        filterSelect('hospital', 'All hospitals', L.hospitals) +
+        filterSelect('consultant', 'All consultants', L.consultants) +
+        filterSelect('classification', 'All classifications', L.classifications) +
+        '<select id="sort" aria-label="Sort">' + Object.keys(SORTS).map(k => '<option value="' + k + '"' + (k === S.sort ? ' selected' : '') + '>Sort: ' + SORTS[k] + '</option>').join('') + '</select>' +
+      '</div>' +
+      '<div class="list-head"><span class="small muted" id="result-count"></span>' +
+        '<label class="toggle"><input type="checkbox" id="show-archived"' + (f.archived ? ' checked' : '') + '> Show archived</label></div>' +
+      '<div class="cards" id="list"></div>' +
+      '<p class="sync" id="sync"></p>' +
+      '<button class="fab" data-act="new">' + icon('plus') + 'Add patient</button>';
+    renderList();
+  }
+
+  function renderList() {
+    const f = S.filters;
+    const base = S.patients.filter(p => matches(p, f, { ignoreStatus: true }));
+    const shown = sortPatients(base.filter(p => matches(p, f)));
+
+    const statuses = uniq(S.lists.statuses.concat(base.map(p => p.status)));
+    const upcomingN = base.filter(isUpcoming).length;
+    let chips = '<button class="chip' + (!f.status && !f.upcoming ? ' on' : '') + '" data-act="chip-status" data-value="">All <span class="n">' + base.length + '</span></button>';
+    statuses.forEach(s => {
+      const n = base.filter(p => p.status === s).length;
+      chips += '<button class="chip tone tone-' + tone(s) + (f.status === s ? ' on' : '') + '" data-act="chip-status" data-value="' + esc(s) + '">' + esc(s) + ' <span class="n">' + n + '</span></button>';
+    });
+    chips += '<button class="chip' + (f.upcoming ? ' on' : '') + '" data-act="chip-upcoming">' + icon('calendar') + 'Next 7 days <span class="n">' + upcomingN + '</span></button>';
+    document.getElementById('chips').innerHTML = chips;
+
+    const list = document.getElementById('list');
+    if (!S.patients.length) {
+      list.innerHTML = '<div class="empty">' + icon('users') + '<p><b>No patients yet</b></p><p class="small">Tap “Add patient” to add your first case.</p></div>';
+    } else if (!shown.length) {
+      list.innerHTML = '<div class="empty">' + icon('search') + '<p><b>No matching patients</b></p><p class="small">Try another search or clear the filters.</p>' +
+        '<p style="margin-top:12px"><button class="btn sm" data-act="clear-filters">Clear filters</button></p></div>';
+    } else {
+      list.innerHTML = shown.map(cardHtml).join('');
+    }
+    document.getElementById('result-count').textContent = shown.length + ' of ' + S.patients.filter(p => f.archived || !p.archived).length + ' patients';
+    const clearBtn = app.querySelector('.search .clear');
+    if (clearBtn) clearBtn.classList.toggle('hidden', !f.q);
+    updateSyncLine();
+  }
+
+  function updateSyncLine() {
+    const line = document.getElementById('sync');
+    if (line) line.textContent = S.loadedAt ? 'Synced with Google Sheets ' + ago(new Date(S.loadedAt).toISOString()) : '';
+    const sub = document.getElementById('sync-line');
+    if (sub) {
+      const active = S.patients.filter(p => !p.archived && !isDone(p)).length;
+      sub.textContent = active + ' active case' + (active === 1 ? '' : 's');
+    }
+  }
+
+  function cardHtml(p) {
+    const done = isDone(p);
+    const st = anesStats(p.anesthesia);
+    const tags = [];
+    if (p.classification) tags.push('<span class="tag">' + icon('tag') + esc(p.classification) + '</span>');
+    if (p.surgeryDate) {
+      const n = dayDiff(today(), p.surgeryDate);
+      const cls = done ? '' : (n < 0 ? 'alert' : (n <= 2 ? 'warn' : ''));
+      tags.push('<span class="tag ' + cls + '">' + icon('calendar') + esc(fmtDay(p.surgeryDate)) + ' · ' + relDay(p.surgeryDate) + '</span>');
+    }
+    if (!done) {
+      tags.push('<span class="tag' + (st.done === st.total && st.total ? ' ok' : '') + '" title="Anesthesia checklist">' + icon('syringe') + st.done + '/' + st.total + '</span>');
+      const w = daysSince(p.createdAt);
+      if (w >= 1) tags.push('<span class="tag' + (w >= 30 ? ' warn' : '') + '">' + icon('clock') + w + 'd waiting</span>');
+    } else {
+      const n = p.photos.postop.length;
+      tags.push('<span class="tag' + (n ? ' ok' : '') + '">' + icon('camera') + n + ' post-op</span>');
+    }
+    if (p.archived) tags.push('<span class="tag">' + icon('archive') + 'Archived</span>');
+
+    return '<article class="card tone-' + tone(p.status) + (p.archived ? ' archived' : '') + '" data-act="open" data-id="' + esc(p.id) + '">' +
+      '<div class="card-top"><h3 dir="auto">' + esc(p.name) + '</h3><span class="badge">' + esc(p.status) + '</span></div>' +
+      '<div class="meta">' + esc(p.hospital) + ' · ' + esc(p.consultant) + (p.procedure ? ' · <span dir="auto">' + esc(p.procedure) + '</span>' : '') + '</div>' +
+      (tags.length ? '<div class="tags">' + tags.join('') + '</div>' : '') +
+      (p.hint ? '<p class="hint" dir="auto">' + esc(p.hint) + '</p>' : '') +
+      (p.phone ?
+        '<div class="card-bottom">' +
+          '<a class="phone" href="' + telHref(p.phone) + '" dir="ltr">' + esc(prettyPhone(p.phone)) + '</a>' +
+          '<a class="round call" href="' + telHref(p.phone) + '" aria-label="Call">' + icon('phone') + '</a>' +
+          '<a class="round wa" href="' + waHref(p.phone) + '" target="_blank" rel="noopener" aria-label="WhatsApp">' + icon('whatsapp') + '</a>' +
+        '</div>' : '') +
+      '</article>';
+  }
+
+  // =========================================================================
+  // New patient wizard
+  // =========================================================================
+
+  function newDraft() {
+    return {
+      hospital: '', consultant: '', name: '', phone: '', age: '', procedure: '',
+      decision: [], preop: [],
+      anesthesia: { items: {}, asa: '', fitness: 'Pending', notes: '' },
+      classification: '', hint: '', surgeryDate: '',
+      status: S.lists.statuses[0] || '',
+    };
+  }
+
+  function draftHasData(d) {
+    return !!(d && (d.hospital || d.consultant || d.name || d.phone || d.decision.length || d.preop.length));
+  }
+
+  const WIZ = [
+    { key: 'hospital', title: 'Hospital', q: 'Which hospital?', auto: true,
+      body: () => optionsBody('hospitals', 'hospital', 'hospital'),
+      check: d => d.hospital ? '' : 'Choose a hospital' },
+    { key: 'consultant', title: 'Consultant', q: 'Which consultant?', auto: true,
+      body: () => optionsBody('consultants', 'consultant', 'doctor'),
+      check: d => d.consultant ? '' : 'Choose a consultant' },
+    { key: 'contact', title: 'Patient', q: 'Patient details', body: contactBody },
+    { key: 'decision', title: 'Decision', q: 'Decision photo', sub: 'Take a photo of the surgical decision or upload it from your gallery.',
+      body: d => draftPhotosBody(d, 'decision') },
+    { key: 'preop', title: 'Pre-op photos', q: 'Pre-op photos', sub: 'Optional — imaging, wounds, reports, anything useful before surgery.', optional: d => !d.preop.length,
+      body: d => draftPhotosBody(d, 'preop') },
+    { key: 'anesthesia', title: 'Anesthesia', q: 'Anesthesia preparation', sub: 'Tick what is already done — you can keep updating it later.',
+      body: d => anesthesiaBody(d.anesthesia) },
+    { key: 'classification', title: 'Classification', q: 'Classification', sub: 'Optional.', auto: true, optional: d => !d.classification,
+      body: () => optionsBody('classifications', 'classification', 'tag', { add: 'classification', toggle: true }) },
+    { key: 'hint', title: 'Hint', q: 'Hint & surgery date', sub: 'Optional — a short reminder shown on the patient card.', optional: d => !d.hint && !d.surgeryDate,
+      body: hintBody },
+    { key: 'status', title: 'Status', q: 'Current status',
+      body: d => optionsBody('statuses', 'status', null, { add: 'status' }) + draftSummary(d) },
+  ];
+
+  function optionsBody(listKey, field, ic, opts) {
+    opts = opts || {};
+    const d = S.draft;
+    const values = S.lists[listKey];
+    return '<div class="options">' + values.map(v => {
+      const on = d[field] === v;
+      const ico = ic
+        ? '<span class="ico">' + icon(ic) + '</span>'
+        : '<span class="ico tone-' + tone(v) + '" style="background:var(--tone-bg);color:var(--tone-fg)">' + icon('flag') + '</span>';
+      return '<button class="option' + (on ? ' on' : '') + '" data-act="wiz-pick" data-field="' + field + '" data-value="' + esc(v) + '"' + (opts.toggle ? ' data-toggle="1"' : '') + '>' +
+        ico + '<span dir="auto">' + esc(v) + '</span><span class="chev">' + icon(on ? 'check' : 'chev') + '</span></button>';
+    }).join('') + '</div>' +
+      (opts.add ? '<button class="btn ghost" style="margin-top:8px" data-act="add-list-item" data-list="' + listKey + '" data-field="' + field + '">' + icon('plus') + 'Add new ' + opts.add + '</button>' : '');
+  }
+
+  function contactBody(d) {
+    return '<div class="field"><label for="f-name">Full name</label>' +
+        '<input id="f-name" class="big-input" data-draft="name" value="' + esc(d.name) + '" dir="auto" autocomplete="off" placeholder="Patient name" data-autofocus></div>' +
+      '<div class="field"><label for="f-phone">Phone number</label>' +
+        '<input id="f-phone" class="big-input" data-draft="phone" value="' + esc(d.phone) + '" inputmode="tel" dir="ltr" autocomplete="off" placeholder="01xxxxxxxxx">' +
+        '<div id="phone-warn">' + phoneWarning(d.phone) + '</div>' +
+        '<span class="help">Calls and WhatsApp automatically add +2 (Egypt).</span></div>' +
+      '<div class="row2">' +
+        '<div class="field"><label for="f-age">Age (optional)</label><input id="f-age" data-draft="age" value="' + esc(d.age) + '" inputmode="numeric"></div>' +
+        '<div class="field"><label for="f-proc">Procedure / diagnosis (optional)</label><input id="f-proc" data-draft="procedure" value="' + esc(d.procedure) + '" dir="auto"></div>' +
+      '</div>';
+  }
+
+  function draftPhotosBody(d, kind) {
+    const list = d[kind];
+    return (list.length
+      ? '<div class="photos">' + list.map((ph, i) =>
+          '<div class="photo"><img src="' + esc(ph.thumb) + '" alt=""><button class="x" data-act="wiz-remove-photo" data-kind="' + kind + '" data-index="' + i + '" aria-label="Remove">' + icon('x') + '</button></div>').join('') + '</div>'
+      : '') +
+      photoButtons(kind, true);
+  }
+
+  function hintBody(d) {
+    return '<div class="field"><label for="f-hint">Hint</label>' +
+        '<textarea id="f-hint" data-draft="hint" dir="auto" placeholder="e.g. Diabetic — needs endocrinology clearance">' + esc(d.hint) + '</textarea></div>' +
+      '<div class="field"><label for="f-date">Planned surgery date</label>' +
+        '<input id="f-date" type="date" data-draft="surgeryDate" value="' + esc(d.surgeryDate) + '"></div>';
+  }
+
+  function draftSummary(d) {
+    const st = anesStats(d.anesthesia);
+    const row = (k, v) => v ? '<div><span class="muted">' + k + ':</span> <b dir="auto">' + esc(v) + '</b></div>' : '';
+    return '<div class="summary">' +
+      row('Patient', d.name) + row('Phone', d.phone ? prettyPhone(d.phone) : '') +
+      row('Hospital', d.hospital) + row('Consultant', d.consultant) +
+      row('Classification', d.classification) + row('Surgery', d.surgeryDate ? fmtDay(d.surgeryDate) : '') +
+      row('Photos', (d.decision.length + d.preop.length) ? d.decision.length + ' decision, ' + d.preop.length + ' pre-op' : '') +
+      row('Anesthesia', st.done + '/' + st.total + ' ready') +
+      '</div>';
+  }
+
+  function renderWizard() {
+    const d = S.draft;
+    if (!d) { navigate({ view: 'home' }, { replace: true }); return; }
+    const i = Math.min(Math.max(S.route.step || 0, 0), WIZ.length - 1);
+    const step = WIZ[i];
+    const last = i === WIZ.length - 1;
+    const skip = step.optional && step.optional(d);
+    app.innerHTML =
+      '<header class="topbar">' +
+        '<button class="icon-btn" data-act="wiz-cancel" aria-label="Cancel">' + icon('x') + '</button>' +
+        '<h1>New patient<span class="sub">Step ' + (i + 1) + ' of ' + WIZ.length + ' · ' + step.title + '</span></h1>' +
+      '</header>' +
+      '<div class="steps">' + WIZ.map((_, k) => '<span class="' + (k <= i ? 'on' : '') + '"></span>').join('') + '</div>' +
+      '<div class="wizard">' +
+        '<h2 class="q">' + step.q + '</h2>' + (step.sub ? '<p class="q-sub">' + step.sub + '</p>' : '<div style="height:14px"></div>') +
+        step.body(d) +
+      '</div>' +
+      '<nav class="wizard-nav"><div class="inner">' +
+        '<button class="btn" data-act="wiz-back">' + (i === 0 ? 'Cancel' : 'Back') + '</button>' +
+        (last
+          ? '<button class="btn primary" data-act="wiz-save">' + icon('check') + 'Save patient</button>'
+          : '<button class="btn primary" data-act="wiz-next">' + (skip ? 'Skip' : 'Next') + '</button>') +
+      '</div></nav>';
+  }
+
+  async function wizardNext() {
+    const d = S.draft;
+    const i = S.route.step || 0;
+    const step = WIZ[i];
+    const problem = step.check ? step.check(d) : '';
+    if (problem) { toast(problem, 'error'); return; }
+    if (step.key === 'contact') {
+      d.name = d.name.trim();
+      if (!d.name) {
+        toast('Enter the patient name', 'error');
+        const el = document.getElementById('f-name');
+        if (el) el.focus();
+        return;
+      }
+      if (!d.phone.trim()) {
+        if (!await confirmSheet({ title: 'No phone number?', text: 'You won’t be able to call or WhatsApp this patient from the app.', ok: 'Continue anyway' })) return;
+      } else if (!validMobile(d.phone)) {
+        if (!await confirmSheet({ title: 'Check the phone number', text: prettyPhone(d.phone) + ' doesn’t look like an Egyptian mobile number.', ok: 'It’s correct' })) return;
+      }
+    }
+    if (step.key === 'decision' && !d.decision.length) {
+      if (!await confirmSheet({ title: 'No decision photo?', text: 'You can add it later from the patient page.', ok: 'Continue' })) return;
+    }
+    navigate({ view: 'new', step: i + 1 });
+  }
+
+  async function startNew() {
+    if (draftHasData(S.draft)) {
+      const resume = await confirmSheet({ title: 'Unsaved patient', text: 'You started adding ' + (S.draft.name || 'a patient') + '. Continue where you left off?', ok: 'Continue', cancel: 'Start over' });
+      if (!resume) S.draft = newDraft();
+    } else {
+      S.draft = newDraft();
+    }
+    navigate({ view: 'new', step: 0 });
+  }
+
+  async function cancelWizard() {
+    if (draftHasData(S.draft) && !await confirmSheet({ title: 'Discard this patient?', text: 'Everything entered so far will be lost.', ok: 'Discard', danger: true })) return;
+    S.draft = null;
+    navigate({ view: 'home' }, { replace: true });
+  }
+
+  async function saveDraft() {
+    const d = S.draft;
+    if (!d.status) { toast('Choose a status', 'error'); return; }
+    busy('Saving patient…');
+    let p;
+    try {
+      p = await call('createPatient', {
+        hospital: d.hospital, consultant: d.consultant, name: d.name.trim(), phone: d.phone ? localPhone(d.phone) : '',
+        age: latinDigits(d.age), procedure: d.procedure, anesthesia: d.anesthesia, classification: d.classification,
+        hint: d.hint, surgeryDate: d.surgeryDate, status: d.status,
+      });
+    } catch (e) {
+      busy(false);
+      toast(errMsg(e), 'error');
+      return;
+    }
+    upsert(p);
+    const uploads = d.decision.map(x => ['decision', x]).concat(d.preop.map(x => ['preop', x]));
+    let failed = 0;
+    for (let i = 0; i < uploads.length; i++) {
+      busy('Uploading photo ' + (i + 1) + ' of ' + uploads.length + '…');
+      try { p = await uploadOne(p.id, uploads[i][0], uploads[i][1]); } catch (e) { failed++; }
+    }
+    S.draft = null;
+    busy(false);
+    navigate({ view: 'patient', id: p.id }, { replace: true });
+    if (failed) toast('Saved, but ' + failed + ' photo(s) failed to upload. Please add them again.', 'error');
+    else toast('Patient saved');
+  }
+
+  // =========================================================================
+  // Patient page
+  // =========================================================================
+
+  function renderPatient(id) {
+    const p = getP(id);
+    if (!p) {
+      app.innerHTML = topbar('Patient') + '<div class="empty">' + icon('users') + '<p><b>Patient not found</b></p><p class="small">It may have been deleted on another device.</p></div>';
+      return;
+    }
+    const done = isDone(p);
+    const statuses = uniq(S.lists.statuses.concat([p.status]));
+    const created = p.createdAt ? fmtDateTime(p.createdAt) + (p.createdBy ? ' · ' + who(p.createdBy) : '') : '';
+    const detail = (k, v) => '<div><dt>' + k + '</dt><dd dir="auto">' + (v ? esc(v) : '<span class="muted">—</span>') + '</dd></div>';
+
+    app.innerHTML =
+      topbar(p.name, p.id, '<button class="icon-btn" data-act="edit" aria-label="Edit">' + icon('edit') + '</button>') +
+      '<div class="page">' +
+
+      '<section class="panel hero tone-' + tone(p.status) + '">' +
+        '<div class="card-top"><h2 dir="auto">' + esc(p.name) + '</h2><span class="badge">' + esc(p.status) + '</span></div>' +
+        '<div class="meta">' + esc(p.hospital) + ' · ' + esc(p.consultant) + (p.classification ? ' · ' + esc(p.classification) : '') + '</div>' +
+        (p.surgeryDate ? '<div class="tags"><span class="tag' + (!done && dayDiff(today(), p.surgeryDate) <= 2 ? (dayDiff(today(), p.surgeryDate) < 0 ? ' alert' : ' warn') : '') + '">' + icon('calendar') + 'Surgery ' + esc(fmtDay(p.surgeryDate)) + ' · ' + relDay(p.surgeryDate) + '</span></div>' : '') +
+        (p.hint ? '<p class="hint" dir="auto">' + esc(p.hint) + '</p>' : '') +
+        (p.phone
+          ? '<div class="contact">' +
+              '<a class="phone" href="' + telHref(p.phone) + '" dir="ltr">' + esc(prettyPhone(p.phone)) + '</a>' +
+              '<a class="round call" href="' + telHref(p.phone) + '" aria-label="Call">' + icon('phone') + '</a>' +
+              '<a class="round wa" href="' + waHref(p.phone) + '" target="_blank" rel="noopener" aria-label="WhatsApp">' + icon('whatsapp') + '</a>' +
+              '<button class="round plain" data-act="templates" aria-label="WhatsApp templates" title="Message templates">' + icon('message') + '</button>' +
+            '</div>'
+          : '<p class="small muted" style="margin-top:10px">No phone number — <a href="#" data-act="edit">add one</a>.</p>') +
+      '</section>' +
+
+      '<section class="panel"><h2>' + icon('flag') + 'Status</h2><div class="chips wrap">' +
+        statuses.map(s => '<button class="chip tone tone-' + tone(s) + (s === p.status ? ' on' : '') + '" data-act="set-status" data-value="' + esc(s) + '">' + (s === p.status ? icon('check') : '') + esc(s) + '</button>').join('') +
+        '<button class="chip add" data-act="add-list-item" data-list="statuses" data-then="status">' + icon('plus') + 'New</button>' +
+      '</div></section>' +
+
+      '<section class="panel"><div class="panel-head"><h2>' + icon('info') + 'Details</h2><button class="btn sm" data-act="edit">' + icon('edit') + 'Edit</button></div><dl class="grid">' +
+        detail('Hospital', p.hospital) + detail('Consultant', p.consultant) +
+        detail('Classification', p.classification) + detail('Age', p.age) +
+        detail('Procedure / diagnosis', p.procedure) + detail('Surgery date', p.surgeryDate ? fmtDay(p.surgeryDate) : '') +
+        detail('Added', created) + detail('Waiting', done ? '' : daysSince(p.createdAt) + ' days') +
+      '</dl></section>' +
+
+      photoPanel(p, 'decision', 'Decision') +
+      photoPanel(p, 'preop', 'Pre-op photos') +
+
+      '<section class="panel"><div class="panel-head"><h2>' + icon('syringe') + 'Anesthesia preparation</h2></div>' + anesthesiaBody(p.anesthesia) + '</section>' +
+
+      (done
+        ? photoPanel(p, 'postop', 'Post-op photos')
+        : '<section class="panel locked"><h2>' + icon('lock') + 'Post-op</h2><p class="small">Post-op photos and notes open once the status is “' + esc(S.doneStatus) + '”.</p></section>') +
+
+      notesPanel(p, done) +
+      historyPanel(p) +
+
+      '<section class="panel"><h2>' + icon('share') + 'More</h2><div class="actions-grid">' +
+        '<button class="btn" data-act="share-summary">' + icon('share') + 'Share</button>' +
+        (p.folderId ? '<a class="btn" href="https://drive.google.com/drive/folders/' + esc(p.folderId) + '" target="_blank" rel="noopener">' + icon('folder') + 'Drive folder</a>' : '<button class="btn" disabled>' + icon('folder') + 'No photos yet</button>') +
+        '<button class="btn" data-act="archive">' + icon('archive') + (p.archived ? 'Unarchive' : 'Archive') + '</button>' +
+        '<button class="btn danger" data-act="delete-patient">' + icon('trash') + 'Delete</button>' +
+      '</div>' +
+      '<p class="small muted" style="margin-top:10px">Last updated ' + esc(ago(p.updatedAt)) + (p.updatedBy ? ' by ' + esc(who(p.updatedBy)) : '') + '</p></section>' +
+      '</div>';
+  }
+
+  function photoButtons(kind, primaryCamera) {
+    return '<div class="photo-actions">' +
+      '<label class="btn file-btn' + (primaryCamera ? ' primary' : '') + '">' + icon('camera') + 'Camera<input type="file" accept="image/*" capture="environment" data-photo-kind="' + kind + '"></label>' +
+      '<label class="btn file-btn">' + icon('image') + 'Upload<input type="file" accept="image/*" multiple data-photo-kind="' + kind + '"></label>' +
+      '</div>';
+  }
+
+  function photoPanel(p, kind, title) {
+    const list = p.photos[kind];
+    const pending = S.pending[p.id + ':' + kind] || 0;
+    let grid = '';
+    if (list.length || pending) {
+      grid = '<div class="photos">' + list.map((ph, i) => {
+        const fid = ph.thumbId || ph.id;
+        return '<button class="photo" data-act="view-photo" data-kind="' + kind + '" data-index="' + i + '" aria-label="Open photo">' +
+          '<img data-fid="' + esc(fid) + '"' + (S.thumbs[fid] ? ' src="' + esc(S.thumbs[fid]) + '"' : '') + ' alt=""></button>';
+      }).join('') + new Array(pending + 1).join('<div class="photo uploading"><div class="spinner sm"></div></div>') + '</div>';
+    } else {
+      grid = '<p class="small muted">No photos yet.</p>';
+    }
+    return '<section class="panel"><div class="panel-head"><h2>' + icon(kind === 'decision' ? 'note' : 'image') + esc(title) + '</h2>' +
+      (list.length ? '<span class="count">' + list.length + '</span>' : '') + '</div>' + grid + photoButtons(kind, kind === 'decision' && !list.length) + '</section>';
+  }
+
+  function anesthesiaBody(a) {
+    const st = anesStats(a);
+    const sel = (key, options) => '<select data-anes="' + key + '">' + options.concat(a[key] && options.indexOf(a[key]) < 0 ? [a[key]] : []).map(o =>
+      '<option value="' + esc(o) + '"' + (o === a[key] ? ' selected' : '') + '>' + esc(o || '—') + '</option>').join('') + '</select>';
+    return '<div class="progress"><span style="width:' + st.pct + '%"></span></div>' +
+      '<p class="small muted" style="margin-top:6px">' + st.done + ' of ' + st.total + ' ready</p>' +
+      '<div class="row2">' +
+        '<div class="field"><label>ASA class</label>' + sel('asa', ASA) + '</div>' +
+        '<div class="field"><label>Anesthesia fitness</label>' + sel('fitness', FITNESS) + '</div>' +
+      '</div>' +
+      '<div class="checklist">' + st.items.map(item =>
+        '<label class="check' + (a.items[item] ? ' done' : '') + '"><input type="checkbox" data-anes-item="' + esc(item) + '"' + (a.items[item] ? ' checked' : '') + '><span dir="auto">' + esc(item) + '</span></label>').join('') +
+      '</div>' +
+      '<div class="field" style="margin:10px 0 0"><label>Anesthesia notes</label>' +
+        '<textarea data-anes="notes" data-keep="anes-notes" dir="auto" placeholder="e.g. Stop aspirin 5 days before, cardiology clearance…">' + esc(a.notes) + '</textarea></div>';
+  }
+
+  function notesPanel(p, done) {
+    const notes = p.notes.slice().reverse();
+    return '<section class="panel"><div class="panel-head"><h2>' + icon('note') + (done ? 'Post-op notes' : 'Notes') + '</h2>' +
+      (notes.length ? '<span class="count">' + notes.length + '</span>' : '') + '</div>' +
+      '<div class="composer"><textarea id="note-text" data-keep="note" dir="auto" rows="2" placeholder="' + (done ? 'Post-op follow-up note…' : 'Add a note…') + '"></textarea>' +
+      '<button class="btn primary" data-act="add-note" aria-label="Add note">' + icon('send') + '</button></div>' +
+      (notes.length ? '<div class="notes">' + notes.map(n =>
+        '<div class="note"><p dir="auto">' + esc(n.text) + '</p><div class="by">' +
+          '<span class="tag' + (n.phase === 'postop' ? ' ok' : '') + '">' + (n.phase === 'postop' ? 'Post-op' : 'Pre-op') + '</span>' +
+          '<span>' + esc(fmtDateTime(n.at)) + (n.by ? ' · ' + esc(who(n.by)) : '') + '</span><span class="spacer"></span>' +
+          '<button data-act="del-note" data-note="' + esc(n.id) + '" aria-label="Delete note">' + icon('trash') + '</button>' +
+        '</div></div>').join('') + '</div>' : '') +
+      '</section>';
+  }
+
+  function historyPanel(p) {
+    if (!p.history.length) return '';
+    const items = p.history.slice().reverse().map(h => {
+      const text = h.type === 'created'
+        ? 'Added' + (h.to ? ' as <b>' + esc(h.to) + '</b>' : '')
+        : 'Status: ' + esc(h.from || '—') + ' → <b>' + esc(h.to) + '</b>';
+      return '<li>' + text + '<span class="when">' + esc(fmtDateTime(h.at)) + (h.by ? ' · ' + esc(who(h.by)) : '') + '</span></li>';
+    });
+    return '<section class="panel"><h2>' + icon('history') + 'Timeline</h2><ul class="timeline">' + items.join('') + '</ul></section>';
+  }
+
+  /** Optimistic update: change the screen now, save in the background (one save at a time per patient). */
+  function patchPatient(id, fields) {
+    const p = getP(id);
+    if (!p) return Promise.resolve();
+    Object.assign(p, clone(fields));
+    rerender();
+    S.queued[id] = (S.queued[id] || 0) + 1;
+    const job = () => call('updatePatient', id, fields).then(np => {
+      if (S.queued[id] === 1) { upsert(np); rerender(); }
+    }).catch(e => {
+      toast('Not saved: ' + errMsg(e), 'error');
+      refresh(false);
+    }).then(() => { S.queued[id]--; });
+    S.chains[id] = (S.chains[id] || Promise.resolve()).then(job, job);
+    return S.chains[id];
+  }
+
+  async function uploadOne(id, kind, ph) {
+    const p = await call('uploadPhoto', id, kind, { dataUrl: ph.dataUrl, thumbDataUrl: ph.thumb });
+    const list = p.photos[kind];
+    const added = list[list.length - 1];
+    if (added) S.thumbs[added.thumbId || added.id] = ph.thumb;
+    upsert(p);
+    return p;
+  }
+
+  async function addPhotos(id, kind, files) {
+    const key = id + ':' + kind;
+    S.pending[key] = (S.pending[key] || 0) + files.length;
+    rerender();
+    const items = await processFiles(files);
+    S.pending[key] -= files.length - items.length;
+    let ok = 0;
+    for (const ph of items) {
+      try { await uploadOne(id, kind, ph); ok++; } catch (e) { toast('Upload failed: ' + errMsg(e), 'error'); }
+      S.pending[key]--;
+      rerender();
+    }
+    if (ok) toast(ok + ' photo' + (ok > 1 ? 's' : '') + ' added');
+  }
+
+  async function setStatus(p, status) {
+    if (p.status === status) return;
+    const fields = { status: status };
+    if (status === S.doneStatus && !p.surgeryDate) fields.surgeryDate = today();
+    await patchPatient(p.id, fields);
+    toast('Status: ' + status);
+  }
+
+  // =========================================================================
+  // Edit page
+  // =========================================================================
+
+  function renderEdit(id) {
+    const p = getP(id);
+    if (!p) { renderPatient(id); return; }
+    const L = S.lists;
+    const sel = (key, values, allowEmpty) => '<select id="e-' + key + '" data-edit="' + key + '">' +
+      (allowEmpty ? '<option value="">—</option>' : '') +
+      uniq(values.concat([p[key]])).map(v => '<option' + (v === p[key] ? ' selected' : '') + '>' + esc(v) + '</option>').join('') + '</select>';
+    app.innerHTML = topbar('Edit patient', p.name) +
+      '<div class="page"><section class="panel">' +
+        '<div class="field"><label for="e-name">Full name</label><input id="e-name" class="big-input" data-edit="name" value="' + esc(p.name) + '" dir="auto"></div>' +
+        '<div class="field"><label for="e-phone">Phone number</label><input id="e-phone" class="big-input" data-edit="phone" value="' + esc(p.phone) + '" inputmode="tel" dir="ltr">' +
+          '<div id="phone-warn">' + phoneWarning(p.phone, p.id) + '</div></div>' +
+        '<div class="row2">' +
+          '<div class="field"><label for="e-hospital">Hospital</label>' + sel('hospital', L.hospitals) + '</div>' +
+          '<div class="field"><label for="e-consultant">Consultant</label>' + sel('consultant', L.consultants) + '</div>' +
+          '<div class="field"><label for="e-classification">Classification</label>' + sel('classification', L.classifications, true) + '</div>' +
+          '<div class="field"><label for="e-status">Status</label>' + sel('status', L.statuses) + '</div>' +
+          '<div class="field"><label for="e-age">Age</label><input id="e-age" data-edit="age" value="' + esc(p.age) + '" inputmode="numeric"></div>' +
+          '<div class="field"><label for="e-surgeryDate">Surgery date</label><input id="e-surgeryDate" type="date" data-edit="surgeryDate" value="' + esc(p.surgeryDate) + '"></div>' +
+        '</div>' +
+        '<div class="field"><label for="e-procedure">Procedure / diagnosis</label><input id="e-procedure" data-edit="procedure" value="' + esc(p.procedure) + '" dir="auto"></div>' +
+        '<div class="field"><label for="e-hint">Hint</label><textarea id="e-hint" data-edit="hint" dir="auto">' + esc(p.hint) + '</textarea></div>' +
+      '</section></div>' +
+      '<div class="savebar"><div class="inner"><span></span><button class="btn" data-act="back">Cancel</button><button class="btn primary" data-act="edit-save">' + icon('check') + 'Save</button></div></div>';
+  }
+
+  async function saveEdit() {
+    const id = S.route.id;
+    const fields = {};
+    app.querySelectorAll('[data-edit]').forEach(el => { fields[el.dataset.edit] = el.value; });
+    fields.name = fields.name.trim();
+    if (!fields.name) { toast('Enter the patient name', 'error'); return; }
+    fields.phone = fields.phone ? localPhone(fields.phone) : '';
+    fields.age = latinDigits(fields.age);
+    busy('Saving…');
+    try {
+      upsert(await call('updatePatient', id, fields));
+      busy(false);
+      toast('Saved');
+      goBack();
+    } catch (e) {
+      busy(false);
+      toast(errMsg(e), 'error');
+    }
+  }
+
+  // =========================================================================
+  // Settings
+  // =========================================================================
+
+  function renderSettings() {
+    if (!S.settingsDraft) S.settingsDraft = clone(S.lists);
+    const d = S.settingsDraft;
+    const dirty = JSON.stringify(d) !== JSON.stringify(S.lists);
+    app.innerHTML = topbar('Settings', S.user) +
+      '<div class="page">' +
+      LIST_META.map(m => {
+        const items = d[m.key];
+        return '<section class="panel"><div class="panel-head"><h2>' + icon(m.icon) + esc(m.title) + '</h2><span class="count">' + items.length + '</span></div>' +
+          (m.help ? '<p class="small muted" style="margin:-4px 0 10px">' + esc(m.help) + '</p>' : '') +
+          '<ul class="edit-list">' + items.map((v, i) => {
+            const locked = m.key === 'statuses' && v === S.doneStatus;
+            return '<li><span dir="auto"' + (m.long ? ' class="template"' : '') + '>' + esc(v) + '</span>' +
+              '<button class="icon-btn" data-act="set-move" data-list="' + m.key + '" data-index="' + i + '" data-dir="-1"' + (i === 0 ? ' disabled' : '') + ' aria-label="Move up">' + icon('up') + '</button>' +
+              '<button class="icon-btn" data-act="set-move" data-list="' + m.key + '" data-index="' + i + '" data-dir="1"' + (i === items.length - 1 ? ' disabled' : '') + ' aria-label="Move down">' + icon('down') + '</button>' +
+              '<button class="icon-btn" data-act="set-del" data-list="' + m.key + '" data-index="' + i + '"' + (locked ? ' disabled' : '') + ' aria-label="Remove">' + icon('trash') + '</button></li>';
+          }).join('') + '</ul>' +
+          '<form class="add-inline" data-form="add-item" data-list="' + m.key + '">' +
+            (m.long ? '<textarea name="v" dir="auto" rows="2" style="flex:1;border-radius:10px;border:1px solid var(--line);background:var(--surface);padding:8px" placeholder="New template…"></textarea>'
+                    : '<input name="v" dir="auto" placeholder="Add ' + esc(m.title.toLowerCase().replace(/s$/, '')) + '…">') +
+            '<button class="btn" type="submit">' + icon('plus') + 'Add</button></form>' +
+          '</section>';
+      }).join('') +
+      '<section class="panel"><h2>' + icon('sheet') + 'Your data</h2>' +
+        '<p class="small muted">Everything is saved in your Google Drive. Signed in as <b>' + esc(S.user || 'unknown') + '</b>.</p>' +
+        '<div class="actions-grid" style="margin-top:12px">' +
+          '<a class="btn" href="' + esc(S.spreadsheetUrl) + '" target="_blank" rel="noopener">' + icon('sheet') + 'Google Sheet</a>' +
+          '<a class="btn" href="' + esc(S.folderUrl) + '" target="_blank" rel="noopener">' + icon('folder') + 'Drive folder</a>' +
+        '</div>' +
+        '<p class="small muted" style="margin-top:12px">To work with a colleague, share the <b>Surgery Follow-ups</b> Drive folder with them (Editor) and follow the “Sharing” steps in the README.</p>' +
+      '</section>' +
+      '</div>' +
+      '<div class="savebar' + (dirty ? '' : ' hidden') + '"><div class="inner"><span>Unsaved changes</span>' +
+        '<button class="btn" data-act="set-reset">Undo</button><button class="btn primary" data-act="set-save">' + icon('check') + 'Save</button></div></div>';
+  }
+
+  function settingsDirty() {
+    return S.settingsDraft && JSON.stringify(S.settingsDraft) !== JSON.stringify(S.lists);
+  }
+
+  async function addListItem(key, title) {
+    const value = await promptSheet({ title: title, placeholder: 'Name' });
+    if (!value) return null;
+    const lists = clone(S.lists);
+    if (lists[key].some(v => v.toLowerCase() === value.toLowerCase())) return lists[key].find(v => v.toLowerCase() === value.toLowerCase());
+    lists[key].push(value);
+    busy('Saving…');
+    try {
+      S.lists = await call('saveLists', lists);
+      S.settingsDraft = null;
+      return value;
+    } catch (e) {
+      toast(errMsg(e), 'error');
+      return null;
+    } finally {
+      busy(false);
+    }
+  }
+
+  // =========================================================================
+  // Overlays: sheets, viewer, busy, toast
+  // =========================================================================
+
+  function openSheet(html, onClose) {
+    const scrim = document.createElement('div');
+    scrim.className = 'scrim';
+    scrim.innerHTML = '<div class="sheet" role="dialog" aria-modal="true"><div class="grab"></div>' + html + '</div>';
+    scrim._onClose = onClose;
+    scrim.addEventListener('click', e => {
+      if (e.target === scrim || e.target.closest('[data-close]')) closeSheet(scrim);
+    });
+    overlayRoot.appendChild(scrim);
+    const af = scrim.querySelector('[data-autofocus]');
+    if (af) setTimeout(() => af.focus(), 50);
+    return scrim;
+  }
+
+  function closeSheet(scrim, value) {
+    if (!scrim || !scrim.parentNode) return;
+    scrim.parentNode.removeChild(scrim);
+    if (scrim._onClose) scrim._onClose(value);
+  }
+
+  function closeOverlays() {
+    Array.from(overlayRoot.querySelectorAll('.scrim')).forEach(s => closeSheet(s));
+    closeViewer();
+  }
+
+  function confirmSheet(o) {
+    return new Promise(resolve => {
+      const s = openSheet('<h3>' + esc(o.title) + '</h3>' + (o.text ? '<p class="muted">' + esc(o.text) + '</p>' : '') +
+        '<div class="sheet-actions"><button class="btn" data-close>' + esc(o.cancel || 'Cancel') + '</button>' +
+        '<button class="btn ' + (o.danger ? 'danger solid' : 'primary') + '" data-ok>' + esc(o.ok || 'OK') + '</button></div>', v => resolve(!!v));
+      s.querySelector('[data-ok]').addEventListener('click', () => closeSheet(s, true));
+    });
+  }
+
+  function promptSheet(o) {
+    return new Promise(resolve => {
+      const s = openSheet('<h3>' + esc(o.title) + '</h3><form data-form="prompt"><div class="field" style="margin-top:10px">' +
+        '<input class="big-input" name="v" dir="auto" autocomplete="off" placeholder="' + esc(o.placeholder || '') + '" value="' + esc(o.value || '') + '" data-autofocus></div>' +
+        '<div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" type="submit">Add</button></div></form>', v => resolve(v || null));
+      s.querySelector('form').addEventListener('submit', e => {
+        e.preventDefault();
+        const v = s.querySelector('input').value.trim();
+        if (v) closeSheet(s, v);
+      });
+    });
+  }
+
+  function openTemplates(p) {
+    const items = S.lists.templates.map(t => {
+      const text = fillTemplate(t, p);
+      return '<a class="template" href="' + esc(waHref(p.phone, text)) + '" target="_blank" rel="noopener" dir="auto">' + icon('whatsapp') + '<span>' + esc(text) + '</span></a>';
+    }).join('');
+    openSheet('<h3>Send WhatsApp message</h3><p class="small muted">To ' + esc(prettyPhone(p.phone)) + '. Edit the templates in Settings.</p>' +
+      '<div class="menu">' + (items || '<p class="muted">No templates yet.</p>') + '</div>' +
+      '<div class="sheet-actions"><button class="btn" data-close>Close</button></div>');
+  }
+
+  function openViewer(pid, kind, index) {
+    S.viewer = { pid: pid, kind: kind, index: index };
+    drawViewer();
+  }
+
+  function closeViewer() {
+    S.viewer = null;
+    const v = overlayRoot.querySelector('.viewer');
+    if (v) v.parentNode.removeChild(v);
+  }
+
+  function drawViewer() {
+    const v = S.viewer;
+    if (!v) return;
+    const p = getP(v.pid);
+    const list = p ? p.photos[v.kind] : [];
+    if (!list.length) { closeViewer(); return; }
+    v.index = Math.max(0, Math.min(v.index, list.length - 1));
+    const ph = list[v.index];
+    const src = S.full[ph.id] || S.thumbs[ph.thumbId || ph.id] || '';
+    let el = overlayRoot.querySelector('.viewer');
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'viewer';
+      overlayRoot.appendChild(el);
+      let x0 = null;
+      el.addEventListener('touchstart', e => { x0 = e.touches[0].clientX; }, { passive: true });
+      el.addEventListener('touchend', e => {
+        if (x0 === null) return;
+        const dx = e.changedTouches[0].clientX - x0;
+        x0 = null;
+        if (Math.abs(dx) > 50) stepViewer(dx < 0 ? 1 : -1);
+      });
+    }
+    el.innerHTML =
+      '<div class="viewer-bar">' +
+        '<button class="icon-btn" data-act="viewer-close" aria-label="Close">' + icon('x') + '</button>' +
+        '<span class="t"><b>' + KIND_LABEL[v.kind] + '</b> · ' + (v.index + 1) + ' / ' + list.length + '<br><span class="small">' + esc(fmtDateTime(ph.at)) + (ph.by ? ' · ' + esc(who(ph.by)) : '') + '</span></span>' +
+        '<a class="icon-btn" href="https://drive.google.com/file/d/' + esc(ph.id) + '/view" target="_blank" rel="noopener" aria-label="Open in Google Drive">' + icon('external') + '</a>' +
+        '<button class="icon-btn" data-act="viewer-delete" aria-label="Delete photo">' + icon('trash') + '</button>' +
+      '</div>' +
+      '<div class="viewer-img">' +
+        (src ? '<img src="' + esc(src) + '" alt="">' : '') +
+        (!S.full[ph.id] ? '<div class="spinner" style="position:absolute"></div>' : '') +
+        (list.length > 1 ? '<button class="round nav prev" data-act="viewer-prev" aria-label="Previous">' + icon('left') + '</button><button class="round nav next" data-act="viewer-next" aria-label="Next">' + icon('right') + '</button>' : '') +
+      '</div>';
+    if (!S.full[ph.id]) {
+      call('getPhotoData', [ph.id]).then(map => {
+        if (map[ph.id]) {
+          cacheFull(ph.id, map[ph.id]);
+          if (S.viewer && list[S.viewer.index] && list[S.viewer.index].id === ph.id) drawViewer();
+        } else {
+          toast('Could not load this photo — it may have been deleted from Drive.', 'error');
+        }
+      }).catch(e => toast(errMsg(e), 'error'));
+    }
+  }
+
+  function stepViewer(dir) {
+    if (!S.viewer) return;
+    const p = getP(S.viewer.pid);
+    const n = p ? p.photos[S.viewer.kind].length : 0;
+    if (n < 2) return;
+    S.viewer.index = (S.viewer.index + dir + n) % n;
+    drawViewer();
+  }
+
+  let busyEl = null;
+  function busy(text) {
+    if (text === false) {
+      if (busyEl) busyEl.parentNode.removeChild(busyEl);
+      busyEl = null;
+      return;
+    }
+    if (!busyEl) {
+      busyEl = document.createElement('div');
+      busyEl.className = 'busy';
+      document.body.appendChild(busyEl);
+    }
+    busyEl.innerHTML = '<div class="box"><div class="spinner"></div><b>' + esc(text) + '</b></div>';
+  }
+
+  let toastTimer = null;
+  function toast(text, kind) {
+    const el = document.getElementById('toast');
+    el.textContent = text;
+    el.className = 'show' + (kind === 'error' ? ' error' : '');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.className = ''; }, kind === 'error' ? 4500 : 2200);
+  }
+
+  // =========================================================================
+  // Actions (event delegation)
+  // =========================================================================
+
+  const ACTIONS = {
+    'reload': () => window.location.reload(),
+    'back': () => {
+      if (S.route.view === 'settings' && settingsDirty()) {
+        confirmSheet({ title: 'Discard changes?', text: 'Your settings changes are not saved.', ok: 'Discard', danger: true }).then(ok => {
+          if (ok) { S.settingsDraft = null; goBack(); }
+        });
+        return;
+      }
+      goBack();
+    },
+    'open': el => navigate({ view: 'patient', id: el.dataset.id }),
+    'new': () => startNew(),
+    'settings': () => { S.settingsDraft = null; navigate({ view: 'settings' }); },
+    'refresh': () => refresh(true),
+    'clear-q': () => { S.filters.q = ''; const q = document.getElementById('q'); if (q) { q.value = ''; q.focus(); } renderList(); },
+    'clear-filters': () => {
+      Object.assign(S.filters, { q: '', status: '', hospital: '', consultant: '', classification: '', upcoming: false });
+      savePrefs();
+      renderHome();
+    },
+    'chip-status': el => {
+      const v = el.dataset.value;
+      S.filters.status = S.filters.status === v ? '' : v;
+      S.filters.upcoming = false;
+      savePrefs();
+      renderList();
+    },
+    'chip-upcoming': () => {
+      S.filters.upcoming = !S.filters.upcoming;
+      S.filters.status = '';
+      if (S.filters.upcoming) S.sort = 'surgery';
+      savePrefs();
+      renderHome();
+    },
+
+    // Wizard
+    'wiz-pick': el => {
+      const field = el.dataset.field;
+      const v = el.dataset.value;
+      S.draft[field] = el.dataset.toggle && S.draft[field] === v ? '' : v;
+      rerender();
+      const step = WIZ[S.route.step || 0];
+      if (step.auto && S.draft[field]) setTimeout(wizardNext, 160);
+    },
+    'wiz-next': () => wizardNext(),
+    'wiz-back': () => ((S.route.step || 0) === 0 ? cancelWizard() : goBack()),
+    'wiz-cancel': () => cancelWizard(),
+    'wiz-save': () => saveDraft(),
+    'wiz-remove-photo': el => {
+      S.draft[el.dataset.kind].splice(Number(el.dataset.index), 1);
+      rerender();
+    },
+
+    // Patient page
+    'edit': () => navigate({ view: 'edit', id: S.route.id }),
+    'edit-save': () => saveEdit(),
+    'set-status': el => setStatus(getP(S.route.id), el.dataset.value),
+    'add-list-item': async el => {
+      const key = el.dataset.list;
+      const meta = LIST_META.find(m => m.key === key);
+      const value = await addListItem(key, 'New ' + meta.title.toLowerCase().replace(/s$/, ''));
+      if (!value) return;
+      if (el.dataset.field && S.draft) S.draft[el.dataset.field] = value;
+      if (el.dataset.then === 'status') await setStatus(getP(S.route.id), value);
+      rerender();
+    },
+    'view-photo': el => openViewer(S.route.id, el.dataset.kind, Number(el.dataset.index)),
+    'viewer-close': () => closeViewer(),
+    'viewer-prev': () => stepViewer(-1),
+    'viewer-next': () => stepViewer(1),
+    'viewer-delete': async () => {
+      const v = S.viewer;
+      const p = getP(v.pid);
+      const ph = p.photos[v.kind][v.index];
+      if (!await confirmSheet({ title: 'Delete this photo?', text: 'It will be moved to the Google Drive trash.', ok: 'Delete', danger: true })) return;
+      busy('Deleting photo…');
+      try {
+        upsert(await call('deletePhoto', p.id, v.kind, ph.id));
+        busy(false);
+        toast('Photo deleted');
+        drawViewer();
+        rerender();
+      } catch (e) {
+        busy(false);
+        toast(errMsg(e), 'error');
+      }
+    },
+    'templates': () => openTemplates(getP(S.route.id)),
+    'share-summary': () => {
+      const p = getP(S.route.id);
+      window.open('https://wa.me/?text=' + encodeURIComponent(summaryText(p)), '_blank', 'noopener');
+    },
+    'add-note': async () => {
+      const ta = document.getElementById('note-text');
+      const text = ta.value.trim();
+      if (!text) { ta.focus(); return; }
+      const id = S.route.id;
+      const btn = app.querySelector('[data-act="add-note"]');
+      btn.disabled = true;
+      try {
+        upsert(await call('addNote', id, text));
+        ta.value = '';
+        rerender();
+        toast('Note added');
+      } catch (e) {
+        btn.disabled = false;
+        toast(errMsg(e), 'error');
+      }
+    },
+    'del-note': async el => {
+      if (!await confirmSheet({ title: 'Delete this note?', ok: 'Delete', danger: true })) return;
+      try {
+        upsert(await call('deleteNote', S.route.id, el.dataset.note));
+        rerender();
+      } catch (e) {
+        toast(errMsg(e), 'error');
+      }
+    },
+    'archive': () => {
+      const p = getP(S.route.id);
+      patchPatient(p.id, { archived: !p.archived });
+      toast(p.archived ? 'Archived — hidden from the home list' : 'Restored');
+    },
+    'delete-patient': async () => {
+      const p = getP(S.route.id);
+      if (!await confirmSheet({ title: 'Delete ' + p.name + '?', text: 'The row is removed from the sheet and the photos go to the Drive trash. Tip: “Archive” hides a patient without deleting anything.', ok: 'Delete', danger: true })) return;
+      busy('Deleting…');
+      try {
+        await call('deletePatient', p.id);
+        S.patients = S.patients.filter(x => x.id !== p.id);
+        busy(false);
+        toast('Patient deleted');
+        navigate({ view: 'home' }, { replace: true });
+      } catch (e) {
+        busy(false);
+        toast(errMsg(e), 'error');
+      }
+    },
+
+    // Settings
+    'set-move': el => {
+      const list = S.settingsDraft[el.dataset.list];
+      const i = Number(el.dataset.index);
+      const j = i + Number(el.dataset.dir);
+      if (j < 0 || j >= list.length) return;
+      const t = list[i]; list[i] = list[j]; list[j] = t;
+      rerender();
+    },
+    'set-del': el => {
+      S.settingsDraft[el.dataset.list].splice(Number(el.dataset.index), 1);
+      rerender();
+    },
+    'set-reset': () => { S.settingsDraft = null; rerender(); },
+    'set-save': async () => {
+      busy('Saving settings…');
+      try {
+        S.lists = await call('saveLists', S.settingsDraft);
+        S.settingsDraft = null;
+        busy(false);
+        toast('Settings saved');
+        rerender();
+      } catch (e) {
+        busy(false);
+        toast(errMsg(e), 'error');
+      }
+    },
+  };
+
+  document.addEventListener('click', e => {
+    const el = e.target.closest('[data-act]');
+    if (!el) return;
+    const link = e.target.closest('a[href]');
+    if (link && !link.dataset.act) return; // a real link inside a clickable card: let it open
+    if (el.tagName === 'A' || el.tagName === 'BUTTON') e.preventDefault();
+    const fn = ACTIONS[el.dataset.act];
+    if (fn) fn(el, e);
+  });
+
+  let searchTimer = null;
+  document.addEventListener('input', e => {
+    const t = e.target;
+    if (t.id === 'q') {
+      S.filters.q = t.value;
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(renderList, 120);
+    } else if (t.dataset.draft && S.draft) {
+      S.draft[t.dataset.draft] = t.value;
+      if (t.dataset.draft === 'phone') document.getElementById('phone-warn').innerHTML = phoneWarning(t.value);
+      if (t.dataset.draft === 'hint' || t.dataset.draft === 'surgeryDate') {
+        const next = app.querySelector('[data-act="wiz-next"]');
+        if (next) next.textContent = S.draft.hint || S.draft.surgeryDate ? 'Next' : 'Skip';
+      }
+    } else if (t.dataset.edit === 'phone') {
+      document.getElementById('phone-warn').innerHTML = phoneWarning(t.value, S.route.id);
+    }
+  });
+
+  document.addEventListener('change', e => {
+    const t = e.target;
+    if (t.dataset.filter) {
+      S.filters[t.dataset.filter] = t.value;
+      t.classList.toggle('set', !!t.value);
+      savePrefs();
+      renderList();
+    } else if (t.id === 'sort') {
+      S.sort = t.value;
+      savePrefs();
+      renderList();
+    } else if (t.id === 'show-archived') {
+      S.filters.archived = t.checked;
+      savePrefs();
+      renderList();
+    } else if (t.dataset.photoKind) {
+      const files = Array.from(t.files || []);
+      t.value = '';
+      if (!files.length) return;
+      if (S.route.view === 'new') {
+        processFiles(files).then(items => {
+          S.draft[t.dataset.photoKind] = S.draft[t.dataset.photoKind].concat(items);
+          rerender();
+        });
+      } else {
+        addPhotos(S.route.id, t.dataset.photoKind, files);
+      }
+    } else if (t.dataset.anesItem !== undefined || t.dataset.anes) {
+      onAnesthesiaChange(t);
+    }
+  });
+
+  function onAnesthesiaChange(t) {
+    const inWizard = S.route.view === 'new';
+    const p = inWizard ? null : getP(S.route.id);
+    const a = clone(inWizard ? S.draft.anesthesia : p.anesthesia);
+    if (t.dataset.anesItem !== undefined) {
+      if (t.checked) a.items[t.dataset.anesItem] = true;
+      else delete a.items[t.dataset.anesItem];
+    } else {
+      a[t.dataset.anes] = t.value;
+    }
+    if (inWizard) {
+      S.draft.anesthesia = a;
+      rerender();
+    } else {
+      patchPatient(p.id, { anesthesia: a });
+    }
+  }
+
+  document.addEventListener('submit', e => {
+    const form = e.target;
+    if (form.dataset.form !== 'add-item') return;
+    e.preventDefault();
+    const input = form.querySelector('[name="v"]');
+    const v = input.value.trim();
+    if (!v) return;
+    const list = S.settingsDraft[form.dataset.list];
+    if (list.some(x => x.toLowerCase() === v.toLowerCase())) { toast('Already in the list', 'error'); return; }
+    list.push(v);
+    input.value = '';
+    rerender();
+  });
+
+  document.addEventListener('keydown', e => {
+    if (S.viewer) {
+      if (e.key === 'Escape') closeViewer();
+      if (e.key === 'ArrowLeft') stepViewer(-1);
+      if (e.key === 'ArrowRight') stepViewer(1);
+      return;
+    }
+    if (e.key === 'Escape') {
+      const sheets = overlayRoot.querySelectorAll('.scrim');
+      if (sheets.length) closeSheet(sheets[sheets.length - 1]);
+    }
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.target.id === 'note-text') ACTIONS['add-note']();
+  });
+
+  // =========================================================================
+  // Loading & sync
+  // =========================================================================
+
+  function applyBootstrap(b) {
+    S.user = b.user;
+    S.lists = b.lists;
+    S.patients = b.patients;
+    S.doneStatus = b.doneStatus;
+    S.spreadsheetUrl = b.spreadsheetUrl;
+    S.folderUrl = b.folderUrl;
+    S.loadedAt = Date.now();
+  }
+
+  async function refresh(manual) {
+    if (S.refreshing) return;
+    if (Object.keys(S.queued).some(k => S.queued[k] > 0)) return;
+    S.refreshing = true;
+    const btn = app.querySelector('[data-act="refresh"]');
+    if (btn) btn.classList.add('spinning');
+    try {
+      const b = await call('getBootstrap');
+      const listsBefore = JSON.stringify(S.lists);
+      applyBootstrap(b);
+      if (S.route.view === 'settings' && listsBefore !== JSON.stringify(S.lists) && !settingsDirty()) S.settingsDraft = null;
+      if (manual) toast('Up to date');
+      if (S.route.view === 'home' || S.route.view === 'patient') rerender();
+    } catch (e) {
+      if (manual) toast(errMsg(e), 'error');
+    } finally {
+      S.refreshing = false;
+      const b2 = app.querySelector('[data-act="refresh"]');
+      if (b2) b2.classList.remove('spinning');
+    }
+  }
+
+  function init() {
+    loadPrefs();
+    try {
+      google.script.history.setChangeHandler(onHistoryChange);
+      google.script.history.replace({ view: 'home' }, {}, '');
+    } catch (e) { /* history not available */ }
+    call('getBootstrap').then(b => {
+      applyBootstrap(b);
+      S.route = { view: 'home' };
+      render();
+    }).catch(e => {
+      app.innerHTML = '<div class="boot"><p class="err"><b>Could not load your data.</b><br>' + esc(errMsg(e)) + '</p>' +
+        '<button class="btn" data-act="reload">Try again</button></div>';
+    });
+    // Pick up changes made on other devices when the app comes back to the foreground.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && S.lists && Date.now() - S.loadedAt > 30000) refresh(false);
+    });
+    setInterval(updateSyncLine, 30000);
+  }
+
+  init();
+})();
+</script>

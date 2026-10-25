@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <base target="_top">
+    <meta charset="utf-8">
+    <?!= include('Styles'); ?>
+  </head>
+  <body>
+    <div id="app">
+      <div class="boot">
+        <div class="spinner"></div>
+        <p>Loading patients…</p>
+      </div>
+    </div>
+    <div id="overlay-root"></div>
+    <div id="toast" role="status" aria-live="polite"></div>
+    <?!= include('Client'); ?>
+  </body>
+</html>
