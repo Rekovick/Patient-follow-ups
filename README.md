@@ -71,17 +71,10 @@ You can open the Sheet at any time to review, filter or export the data (File �
 
 1. Go to **https://script.google.com** while signed in to the Google account that should own the data.
    Click **New project** and rename it to *Surgery Follow-ups*.
-2. Create the files and paste in the content from the [`apps-script/`](apps-script) folder of this repo:
-   | In the Apps Script editor | Paste the content of |
-   |---|---|
-   | `Code.gs` (already there, replace everything) | `apps-script/Code.gs` |
-   | **+ → HTML** named `Index` | `apps-script/Index.html` |
-   | **+ → HTML** named `Styles` | `apps-script/Styles.html` |
-   | **+ → HTML** named `Client` | `apps-script/Client.html` |
-   | `appsscript.json`, see the note below | `apps-script/appsscript.json` |
-
-   To see `appsscript.json`, open **Project Settings ⚙** and tick
-   **"Show 'appsscript.json' manifest file in editor"**.
+2. Open [`install/Code.gs`](install/Code.gs) (click **Raw**), copy all of it, and paste it into the editor's
+   `Code.gs`, **replacing everything** in it. This single file contains the whole app, so you don't need to create other files.
+   (The `apps-script/` folder holds the same code split into separate files for development;
+   `install/Code.gs` is generated from it with `node dev/build-setup-guide.js`.)
 3. Click **Save 💾**. Choose the `setup` function in the toolbar and click **Run**.
    Google will ask for permission. Click **Review permissions**, choose your account, then
    **Advanced → Go to Surgery Follow-ups (unsafe)** → **Allow**.
@@ -97,7 +90,7 @@ You can open the Sheet at any time to review, filter or export the data (File �
    - iPhone (Safari): Share → **Add to Home Screen**
 
 ### Updating the app later
-Paste the new code, then go to **Deploy → Manage deployments → ✏️ Edit → Version: New version → Deploy**.
+Paste the new `install/Code.gs` over the old one, then go to **Deploy → Manage deployments → ✏️ Edit → Version: New version → Deploy**.
 The URL stays the same.
 
 ## Sharing with a colleague

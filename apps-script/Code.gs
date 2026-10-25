@@ -61,8 +61,12 @@ const LIST_DEFS = [
 // ---------------------------------------------------------------------------
 
 function doGet() {
-  return HtmlService.createTemplateFromFile('Index')
-    .evaluate()
+  // The single-file installer (install/Code.gs) embeds the page as APP_HTML;
+  // the multi-file project builds it from Index/Styles/Client instead.
+  const page = typeof APP_HTML === 'string'
+    ? HtmlService.createHtmlOutput(APP_HTML)
+    : HtmlService.createTemplateFromFile('Index').evaluate();
+  return page
     .setTitle(APP_TITLE)
     .addMetaTag('viewport', 'width=device-width, initial-scale=1, viewport-fit=cover')
     .addMetaTag('mobile-web-app-capable', 'yes')

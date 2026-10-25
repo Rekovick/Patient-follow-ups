@@ -1,24 +1,22 @@
 #!/usr/bin/env node
 /*
- * Builds dev/setup-guide.html: a step-by-step launch page with copy buttons for every
- * Apps Script file, so the app can be installed without opening GitHub.
+ * Builds dev/setup-guide.html: a step-by-step launch page with a copy button for the
+ * single-file installer (install/Code.gs, rebuilt here too), so no GitHub is needed.
  *   node dev/build-setup-guide.js
  */
 const fs = require('fs');
 const path = require('path');
 
-const dir = path.join(__dirname, '..', 'apps-script');
-const FILES = [
-  { name: 'Code.gs', editorName: 'Code.gs', how: 'Already there when the project opens. Select everything in it, delete it, and paste.' },
-  { name: 'Index.html', editorName: 'Index', how: 'Click <b>+</b> next to <i>Files</i> → <b>HTML</b>, type <code>Index</code>, press Enter. Delete the starter text and paste.' },
-  { name: 'Styles.html', editorName: 'Styles', how: '<b>+</b> → <b>HTML</b>, name it <code>Styles</code>. Delete the starter text and paste.' },
-  { name: 'Client.html', editorName: 'Client', how: '<b>+</b> → <b>HTML</b>, name it <code>Client</code>. Delete the starter text and paste.' },
-  { name: 'appsscript.json', editorName: 'appsscript.json', how: 'Open <b>Project Settings ⚙</b> (left bar) and tick <b>Show "appsscript.json" manifest file in editor</b>. Go back to the editor ( &lt;&gt; ), open <code>appsscript.json</code>, replace everything and paste.' },
-];
-const data = FILES.map(f => {
-  const text = fs.readFileSync(path.join(dir, f.name), 'utf8');
-  return Object.assign({}, f, { text: text, lines: text.split('\n').length });
-});
+// The whole app as one file (see dev/build-installer.js), so there is only one thing to paste.
+const installer = require('./build-installer.js').build();
+fs.mkdirSync(path.join(__dirname, '..', 'install'), { recursive: true });
+fs.writeFileSync(path.join(__dirname, '..', 'install', 'Code.gs'), installer);
+const data = [{
+  editorName: 'Code.gs',
+  how: 'In the editor, click inside <code>Code.gs</code>, press <b>Ctrl + A</b> (select all) and <b>Delete</b> so it is completely empty, then <b>Ctrl + V</b> to paste.',
+  text: installer,
+  lines: installer.split('\n').length,
+}];
 const json = JSON.stringify(data).replace(/</g, '\\u003c');
 
 const html = `<title>Follow-ups Launch Kit</title>
@@ -108,10 +106,11 @@ const html = `<title>Follow-ups Launch Kit</title>
       <div class="note">If your browser is signed in to more than one Google account, use a window signed in only to this one. Apps Script often fails with several accounts.</div>
       <label class="tick"><input type="checkbox" id="s1"> Done</label></div></li>
 
-    <li class="step" data-step="2"><span class="num"></span><h2>Paste the 5 files</h2><div class="body">
-      <p>For each file below, press <b>Copy</b>, then paste it into the editor as described. Names must match exactly; the editor adds <code>.html</code> by itself.</p>
+    <li class="step" data-step="2"><span class="num"></span><h2>Paste the app into Code.gs</h2><div class="body">
+      <p>The whole app is one file. Press <b>Copy</b>, then replace everything in <code>Code.gs</code> with it. You don't need to create any other files.</p>
       <div class="files" id="files"></div>
-      <label class="tick"><input type="checkbox" id="s2"> All 5 pasted</label></div></li>
+      <div class="note">Paste it <b>once</b>. When you're done, the last line of <code>Code.gs</code> should be <code>].join('\\n');</code> at about line ${data[0].lines - 1}.</div>
+      <label class="tick"><input type="checkbox" id="s2"> Pasted</label></div></li>
 
     <li class="step" data-step="3"><span class="num"></span><h2>Save and run setup</h2><div class="body">
       <p>Press <b>Ctrl + S</b> (<b>⌘ + S</b> on Mac). Open <code>Code.gs</code>, choose <code>setup</code> in the function menu at the top, and click <b>▷ Run</b>.</p>
@@ -163,7 +162,7 @@ const html = `<title>Follow-ups Launch Kit</title>
       <ul>
         <li><b>"Sorry, unable to open the file at this time"</b>: the browser has several Google accounts signed in. Use a window with only the owner account.</li>
         <li><b>"Script function not found: doGet"</b>: <code>Code.gs</code> wasn't saved. Paste it again and press Save.</li>
-        <li><b>A page with raw code or <code>include</code> errors</b>: an HTML file has the wrong name. It must be exactly <code>Index</code>, <code>Styles</code> and <code>Client</code>.</li>
+        <li><b>"Syntax error … line: …"</b> when saving: <code>Code.gs</code> has something extra in it, usually the file pasted twice. Press Ctrl + A, Delete, and paste once more.</li>
       </ul></div>
   </section>
 </main>
