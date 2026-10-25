@@ -1,17 +1,62 @@
-<script>
 (function () {
   'use strict';
 
   // =========================================================================
-  // Server bridge
+  // Server bridge — the app talks to the Apps Script data server over HTTPS
   // =========================================================================
 
-  function call(fn) {
+  const CONN_KEY = 'surgery-followups.connection.v1';
+  const CACHE_KEY = 'surgery-followups.cache.v1';
+
+  function loadConnection() {
+    try {
+      const c = JSON.parse(localStorage.getItem(CONN_KEY) || 'null');
+      return c && c.url && c.key ? c : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function saveConnection(c) {
+    try {
+      if (c) localStorage.setItem(CONN_KEY, JSON.stringify(c));
+      else { localStorage.removeItem(CONN_KEY); localStorage.removeItem(CACHE_KEY); }
+    } catch (e) { /* storage unavailable */ }
+  }
+
+  async function request(conn, fn, args) {
+    let res;
+    try {
+      // A text/plain body keeps this a "simple" request, which Apps Script accepts from another site.
+      res = await fetch(conn.url, { method: 'POST', body: JSON.stringify({ key: conn.key, fn: fn, args: args || [] }) });
+    } catch (e) {
+      throw new Error(navigator.onLine === false
+        ? 'No internet connection. Check your signal and try again.'
+        : 'Could not reach the server. Check your internet, and that the Apps Script deployment has access set to “Anyone”.');
+    }
+    let data;
+    try {
+      data = await res.json();
+    } catch (e) {
+      throw new Error('That server link doesn’t look right. Use the Apps Script web app link that ends in /exec.');
+    }
+    if (!data.ok) {
+      const err = new Error(data.error === 'ACCESS_DENIED' ? 'This access key isn’t valid. It may have been removed or reset.' : data.error);
+      err.denied = data.error === 'ACCESS_DENIED';
+      throw err;
+    }
+    return data.result;
+  }
+
+  async function call(fn) {
     const args = Array.prototype.slice.call(arguments, 1);
-    return new Promise((resolve, reject) => {
-      const runner = google.script.run.withSuccessHandler(resolve).withFailureHandler(reject);
-      runner[fn].apply(runner, args);
-    });
+    if (!S.conn) throw new Error('This device isn’t connected yet.');
+    try {
+      return await request(S.conn, fn, args);
+    } catch (e) {
+      if (e.denied) onAccessDenied(e.message);
+      throw e;
+    }
   }
 
   // =========================================================================
@@ -45,6 +90,11 @@
     chains: {},
     queued: {},
     viewer: null,
+    conn: null,
+    isAdmin: false,
+    people: null,
+    connectMsg: '',
+    installPrompt: null,
   };
 
   const SORTS = {
@@ -254,7 +304,8 @@
 
   function who(email) {
     if (!email) return '';
-    return email === S.user ? 'you' : email.split('@')[0];
+    const name = email.split('@')[0];
+    return email === S.user || name === S.user ? 'you' : name;
   }
 
   function uniq(list) {
@@ -472,8 +523,8 @@
     opts = opts || {};
     S.route = route;
     try {
-      if (opts.replace) google.script.history.replace(route, {}, '');
-      else { google.script.history.push(route, {}, ''); S.depth++; }
+      if (opts.replace) history.replaceState(route, '');
+      else { history.pushState(route, ''); S.depth++; }
     } catch (e) { /* history not available */ }
     closeOverlays();
     render();
@@ -489,16 +540,8 @@
   }
 
   function goBack() {
-    const before = JSON.stringify(S.route);
-    const target = parentRoute(S.route);
-    if (S.depth > 0) {
-      try { window.history.back(); } catch (e) { /* ignore */ }
-      setTimeout(() => {
-        if (JSON.stringify(S.route) === before) navigate(target, { replace: true });
-      }, 450);
-    } else {
-      navigate(target, { replace: true });
-    }
+    if (S.depth > 0) history.back();
+    else navigate(parentRoute(S.route), { replace: true });
   }
 
   function onHistoryChange(e) {
@@ -509,8 +552,10 @@
   }
 
   function render() {
-    if (!S.lists) return;
     const r = S.route;
+    if (r.view === 'connect') { renderConnect(); return; }
+    if (!S.lists) return;
+    saveCacheSoon();
     if (r.view === 'patient') renderPatient(r.id);
     else if (r.view === 'edit') renderEdit(r.id);
     else if (r.view === 'new') renderWizard();
@@ -569,6 +614,7 @@
       '<header class="topbar">' +
         '<div class="brand-dot">' + icon('pulse') + '</div>' +
         '<h1>Surgery Follow-ups<span class="sub" id="sync-line"></span></h1>' +
+        (S.installPrompt ? '<button class="btn sm primary" data-act="install">Install</button>' : '') +
         '<button class="icon-btn' + (S.refreshing ? ' spinning' : '') + '" data-act="refresh" aria-label="Refresh">' + icon('refresh') + '</button>' +
         '<button class="icon-btn" data-act="settings" aria-label="Settings">' + icon('settings') + '</button>' +
       '</header>' +
@@ -658,8 +704,8 @@
       (p.hint ? '<p class="hint" dir="auto">' + esc(p.hint) + '</p>' : '') +
       (p.phone ?
         '<div class="card-bottom">' +
-          '<a class="phone" href="' + telHref(p.phone) + '" target="_blank" rel="noopener" dir="ltr">' + esc(prettyPhone(p.phone)) + '</a>' +
-          '<a class="round call" href="' + telHref(p.phone) + '" target="_blank" rel="noopener" aria-label="Call">' + icon('phone') + '</a>' +
+          '<a class="phone" href="' + telHref(p.phone) + '" dir="ltr">' + esc(prettyPhone(p.phone)) + '</a>' +
+          '<a class="round call" href="' + telHref(p.phone) + '" aria-label="Call">' + icon('phone') + '</a>' +
           '<a class="round wa" href="' + waHref(p.phone) + '" target="_blank" rel="noopener" aria-label="WhatsApp">' + icon('whatsapp') + '</a>' +
         '</div>' : '') +
       '</article>';
@@ -884,8 +930,8 @@
         (p.hint ? '<p class="hint" dir="auto">' + esc(p.hint) + '</p>' : '') +
         (p.phone
           ? '<div class="contact">' +
-              '<a class="phone" href="' + telHref(p.phone) + '" target="_blank" rel="noopener" dir="ltr">' + esc(prettyPhone(p.phone)) + '</a>' +
-              '<a class="round call" href="' + telHref(p.phone) + '" target="_blank" rel="noopener" aria-label="Call">' + icon('phone') + '</a>' +
+              '<a class="phone" href="' + telHref(p.phone) + '" dir="ltr">' + esc(prettyPhone(p.phone)) + '</a>' +
+              '<a class="round call" href="' + telHref(p.phone) + '" aria-label="Call">' + icon('phone') + '</a>' +
               '<a class="round wa" href="' + waHref(p.phone) + '" target="_blank" rel="noopener" aria-label="WhatsApp">' + icon('whatsapp') + '</a>' +
               '<button class="round plain" data-act="templates" aria-label="WhatsApp templates" title="Message templates">' + icon('message') + '</button>' +
             '</div>'
@@ -1119,13 +1165,14 @@
             '<button class="btn" type="submit">' + icon('plus') + 'Add</button></form>' +
           '</section>';
       }).join('') +
+      devicePanel() +
+      (S.isAdmin ? peoplePanel() : '') +
       '<section class="panel"><h2>' + icon('sheet') + 'Your data</h2>' +
-        '<p class="small muted">Everything is saved in your Google Drive. Signed in as <b>' + esc(S.user || 'unknown') + '</b>.</p>' +
+        '<p class="small muted">Everything is saved in the owner’s Google Drive.</p>' +
         '<div class="actions-grid" style="margin-top:12px">' +
           '<a class="btn" href="' + esc(S.spreadsheetUrl) + '" target="_blank" rel="noopener">' + icon('sheet') + 'Google Sheet</a>' +
           '<a class="btn" href="' + esc(S.folderUrl) + '" target="_blank" rel="noopener">' + icon('folder') + 'Drive folder</a>' +
         '</div>' +
-        '<p class="small muted" style="margin-top:12px">To work with a colleague, share the <b>Surgery Follow-ups</b> Drive folder with them (Editor) and follow the “Sharing” steps in the README.</p>' +
       '</section>' +
       '</div>' +
       '<div class="savebar' + (dirty ? '' : ' hidden') + '"><div class="inner"><span>Unsaved changes</span>' +
@@ -1152,6 +1199,174 @@
       return null;
     } finally {
       busy(false);
+    }
+  }
+
+  function devicePanel() {
+    return '<section class="panel"><h2>' + icon('phone') + 'This device</h2>' +
+      '<p class="small muted">Connected as <b>' + esc(S.user) + '</b>' + (S.isAdmin ? ' (owner)' : '') + '.</p>' +
+      '<div class="actions-grid" style="margin-top:12px">' +
+        (S.installPrompt ? '<button class="btn primary" data-act="install">' + icon('plus') + 'Install app</button>' : '') +
+        '<button class="btn" data-act="connect-device">' + icon('share') + 'Connect my other device</button>' +
+        '<button class="btn danger" data-act="disconnect">' + icon('x') + 'Disconnect</button>' +
+      '</div>' +
+      (S.installPrompt ? '' : '<p class="small muted" style="margin-top:10px">To install: Android Chrome <b>⋮ → Install app</b>. iPhone Safari <b>Share → Add to Home Screen</b>.</p>') +
+      '</section>';
+  }
+
+  function peoplePanel() {
+    if (!S.people) loadPeople();
+    const list = S.people || [];
+    return '<section class="panel"><div class="panel-head"><h2>' + icon('users') + 'People with access</h2>' +
+        (S.people ? '<span class="count">' + list.length + '</span>' : '<div class="spinner sm"></div>') + '</div>' +
+      '<p class="small muted" style="margin:-4px 0 10px">Each person gets their own key, and their name appears on the changes they make. Removing a person disconnects all their devices.</p>' +
+      '<ul class="edit-list">' + list.map(p =>
+        '<li><span dir="auto">' + esc(p.name) + (p.admin ? ' <span class="tag">Owner</span>' : '') + '</span>' +
+        (p.admin ? '' : '<button class="icon-btn" data-act="remove-person" data-id="' + esc(p.id) + '" data-name="' + esc(p.name) + '" aria-label="Remove access">' + icon('trash') + '</button>') +
+        '</li>').join('') + '</ul>' +
+      '<button class="btn" style="margin-top:10px" data-act="add-person">' + icon('plus') + 'Add a person</button>' +
+      '</section>';
+  }
+
+  function loadPeople() {
+    if (S.peopleLoading) return;
+    S.peopleLoading = true;
+    call('listPeople').then(list => { S.people = list; rerender(); })
+      .catch(e => toast(errMsg(e), 'error'))
+      .then(() => { S.peopleLoading = false; });
+  }
+
+  function renderConnect() {
+    const c = S.conn || S.lastConn || {};
+    app.innerHTML =
+      '<header class="topbar"><div class="brand-dot">' + icon('pulse') + '</div>' +
+        '<h1>Surgery Follow-ups<span class="sub">Connect this device</span></h1></header>' +
+      '<div class="page"><section class="panel">' +
+        (S.connectMsg ? '<div class="field"><div class="warn">' + esc(S.connectMsg) + '</div></div>' : '') +
+        '<p class="muted" style="margin-bottom:14px">Your patients are kept in Google Drive. To connect, open a <b>connect link</b> or scan the <b>QR code</b> from a device that’s already connected. ' +
+        'Or paste the server link and access key that <b>setup</b> printed in Apps Script.</p>' +
+        '<form data-form="connect">' +
+          '<div class="field"><label for="c-url">Server link</label>' +
+            '<input id="c-url" name="url" class="big-input" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://script.google.com/macros/s/…/exec" value="' + esc(c.url || '') + '"></div>' +
+          '<div class="field"><label for="c-key">Access key</label>' +
+            '<input id="c-key" name="key" class="big-input" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste your access key"></div>' +
+          '<button class="btn primary block" type="submit">Connect</button>' +
+        '</form></section></div>';
+  }
+
+  async function connectWith(conn) {
+    conn = { url: String(conn.url || '').trim(), key: String(conn.key || '').trim() };
+    if (!/^(https:\/\/script\.google\.com\/.+\/exec|fake:.+)$/.test(conn.url)) {
+      toast('The server link should start with https://script.google.com/ and end with /exec', 'error');
+      return;
+    }
+    if (!conn.key) { toast('Paste the access key', 'error'); return; }
+    busy('Connecting…');
+    try {
+      const b = await request(conn, 'getBootstrap');
+      S.conn = conn;
+      saveConnection(conn);
+      applyBootstrap(b);
+      S.connectMsg = '';
+      S.people = null;
+      busy(false);
+      navigate({ view: 'home' }, { replace: true });
+      toast('Connected as ' + S.user);
+    } catch (e) {
+      busy(false);
+      S.lastConn = conn;
+      toast(errMsg(e), 'error');
+      if (S.route.view !== 'connect') navigate({ view: 'connect' }, { replace: true });
+    }
+  }
+
+  function onAccessDenied(message) {
+    S.lastConn = S.conn;
+    S.conn = null;
+    saveConnection(null);
+    S.lists = null;
+    S.patients = [];
+    S.connectMsg = message + ' Ask the owner for a new connect link.';
+    navigate({ view: 'connect' }, { replace: true });
+  }
+
+  function connectLink(key) {
+    const payload = btoa(JSON.stringify({ u: S.conn.url, k: key })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    return location.href.split('#')[0] + '#connect=' + payload;
+  }
+
+  function parseConnectHash() {
+    const m = /#connect=([\w-]+)/.exec(location.hash);
+    if (!m) return null;
+    try {
+      const j = JSON.parse(atob(m[1].replace(/-/g, '+').replace(/_/g, '/')));
+      return j.u && j.k ? { url: j.u, key: j.k } : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function loadQrLib() {
+    if (window.qrcode) return Promise.resolve(window.qrcode);
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'vendor/qrcode.js';
+      s.onload = () => resolve(window.qrcode);
+      s.onerror = () => reject(new Error('Could not load the QR code maker.'));
+      document.head.appendChild(s);
+    });
+  }
+
+  async function showConnectSheet(title, text, key) {
+    const link = connectLink(key);
+    let qr = '';
+    try {
+      const q = (await loadQrLib())(0, 'M');
+      q.addData(link);
+      q.make();
+      qr = q.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+    } catch (e) {
+      qr = '';
+    }
+    const s = openSheet('<h3>' + esc(title) + '</h3><p class="muted">' + esc(text) + '</p>' +
+      (qr ? '<div class="qr">' + qr + '</div>' : '') +
+      '<div class="field" style="margin-top:12px"><input id="connect-link" readonly value="' + esc(link) + '" dir="ltr"></div>' +
+      '<p class="small muted">Anyone with this link can open the patient list, so send it only to that person.</p>' +
+      '<div class="sheet-actions"><button class="btn" data-copy>' + icon('note') + 'Copy link</button>' +
+      '<a class="btn wa" href="' + esc('https://wa.me/?text=' + encodeURIComponent(link)) + '" target="_blank" rel="noopener">' + icon('whatsapp') + 'WhatsApp</a></div>' +
+      '<div class="sheet-actions" style="margin-top:8px"><button class="btn" data-close>Done</button></div>');
+    s.querySelector('[data-copy]').addEventListener('click', () => {
+      const input = s.querySelector('#connect-link');
+      const copied = () => toast('Link copied');
+      try {
+        navigator.clipboard.writeText(link).then(copied, () => { input.select(); toast('Press and hold the link to copy it'); });
+      } catch (e) {
+        input.select();
+      }
+    });
+  }
+
+  // Keeps the last download on this device so the app opens instantly, even with a weak signal.
+  let cacheTimer = null;
+  function saveCacheSoon() {
+    clearTimeout(cacheTimer);
+    cacheTimer = setTimeout(() => {
+      if (!S.conn || !S.lists) return;
+      try {
+        localStorage.setItem(CACHE_KEY, JSON.stringify({
+          user: S.user, isAdmin: S.isAdmin, lists: S.lists, patients: S.patients, doneStatus: S.doneStatus,
+          spreadsheetUrl: S.spreadsheetUrl, folderUrl: S.folderUrl, loadedAt: S.loadedAt,
+        }));
+      } catch (e) { /* storage full: the app still works online */ }
+    }, 500);
+  }
+
+  function loadCache() {
+    try {
+      const c = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
+      return c && c.lists && Array.isArray(c.patients) ? c : null;
+    } catch (e) {
+      return null;
     }
   }
 
@@ -1313,6 +1528,51 @@
 
   const ACTIONS = {
     'reload': () => window.location.reload(),
+    'go-connect': () => navigate({ view: 'connect' }, { replace: true }),
+    'install': () => {
+      const ev = S.installPrompt;
+      if (!ev) return;
+      ev.prompt();
+      ev.userChoice.then(() => { S.installPrompt = null; rerender(); });
+    },
+    'connect-device': () => showConnectSheet('Connect your other device',
+      'Scan this code with the other phone’s camera, or send yourself the link and open it there.', S.conn.key),
+    'disconnect': async () => {
+      if (!await confirmSheet({ title: 'Disconnect this device?', text: 'Patient data is removed from this device; nothing is deleted from Google Drive. You’ll need a connect link or your key to connect again.', ok: 'Disconnect', danger: true })) return;
+      S.lastConn = { url: S.conn.url };
+      S.conn = null;
+      saveConnection(null);
+      S.lists = null;
+      S.patients = [];
+      S.people = null;
+      S.connectMsg = '';
+      navigate({ view: 'connect' }, { replace: true });
+    },
+    'add-person': async () => {
+      const name = await promptSheet({ title: 'Add a person', placeholder: 'Their name, e.g. Dr Sara' });
+      if (!name) return;
+      busy('Creating access…');
+      try {
+        const r = await call('addPerson', name);
+        S.people = (S.people || []).concat([r.person]);
+        busy(false);
+        rerender();
+        showConnectSheet('Send this to ' + r.person.name, 'They open the link (or scan the code) on their phone once, and the app connects.', r.key);
+      } catch (e) {
+        busy(false);
+        toast(errMsg(e), 'error');
+      }
+    },
+    'remove-person': async el => {
+      if (!await confirmSheet({ title: 'Remove ' + el.dataset.name + '?', text: 'All their devices are disconnected right away. Their past changes stay.', ok: 'Remove', danger: true })) return;
+      try {
+        S.people = await call('removePerson', el.dataset.id);
+        rerender();
+        toast(el.dataset.name + ' removed');
+      } catch (e) {
+        toast(errMsg(e), 'error');
+      }
+    },
     'back': () => {
       if (S.route.view === 'settings' && settingsDirty()) {
         confirmSheet({ title: 'Discard changes?', text: 'Your settings changes are not saved.', ok: 'Discard', danger: true }).then(ok => {
@@ -1557,6 +1817,11 @@
 
   document.addEventListener('submit', e => {
     const form = e.target;
+    if (form.dataset.form === 'connect') {
+      e.preventDefault();
+      connectWith({ url: form.elements.url.value, key: form.elements.key.value });
+      return;
+    }
     if (form.dataset.form !== 'add-item') return;
     e.preventDefault();
     const input = form.querySelector('[name="v"]');
@@ -1589,6 +1854,7 @@
 
   function applyBootstrap(b) {
     S.user = b.user;
+    S.isAdmin = !!b.isAdmin;
     S.lists = b.lists;
     S.patients = b.patients;
     S.doneStatus = b.doneStatus;
@@ -1621,18 +1887,52 @@
 
   function init() {
     loadPrefs();
-    try {
-      google.script.history.setChangeHandler(onHistoryChange);
-      google.script.history.replace({ view: 'home' }, {}, '');
-    } catch (e) { /* history not available */ }
-    call('getBootstrap').then(b => {
-      applyBootstrap(b);
-      S.route = { view: 'home' };
-      render();
-    }).catch(e => {
-      app.innerHTML = '<div class="boot"><p class="err"><b>Could not load your data.</b><br>' + esc(errMsg(e)) + '</p>' +
-        '<button class="btn" data-act="reload">Try again</button></div>';
+    window.addEventListener('popstate', onHistoryChange);
+    window.addEventListener('hashchange', () => {
+      const link = parseConnectHash();
+      if (!link) return;
+      try { history.replaceState(S.route, '', location.pathname + location.search); } catch (e) { /* ignore */ }
+      connectWith(link);
     });
+    window.addEventListener('beforeinstallprompt', e => {
+      e.preventDefault();
+      S.installPrompt = e;
+      if (S.route.view === 'settings' || S.route.view === 'home') rerender();
+    });
+    if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+      navigator.serviceWorker.register('sw.js').catch(() => { /* app still works without offline support */ });
+    }
+    const fromLink = parseConnectHash();
+    try { history.replaceState({ view: 'home' }, '', location.pathname + location.search); } catch (e) { /* ignore */ }
+    S.conn = loadConnection();
+
+    if (fromLink) {
+      S.route = { view: 'connect' };
+      render();
+      connectWith(fromLink);
+    } else if (!S.conn) {
+      S.route = { view: 'connect' };
+      render();
+    } else {
+      const cached = loadCache();
+      if (cached) {
+        applyBootstrap(cached);
+        S.loadedAt = cached.loadedAt || 0;
+        S.route = { view: 'home' };
+        render();
+        refresh(false);
+      } else {
+        call('getBootstrap').then(b => {
+          applyBootstrap(b);
+          S.route = { view: 'home' };
+          render();
+        }).catch(e => {
+          if (e.denied) return;
+          app.innerHTML = '<div class="boot"><p class="err"><b>Could not load your data.</b><br>' + esc(errMsg(e)) + '</p>' +
+            '<button class="btn" data-act="reload">Try again</button> <button class="btn ghost" data-act="go-connect">Connection settings</button></div>';
+        });
+      }
+    }
     // Pick up changes made on other devices when the app comes back to the foreground.
     document.addEventListener('visibilitychange', () => {
       if (document.visibilityState === 'visible' && S.lists && Date.now() - S.loadedAt > 30000) refresh(false);
@@ -1642,4 +1942,3 @@
 
   init();
 })();
-</script>

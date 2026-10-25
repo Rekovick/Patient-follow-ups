@@ -1,4 +1,3 @@
-<style>
   :root {
     --bg: #f3f5f7;
     --surface: #ffffff;
@@ -404,4 +403,7 @@
   }
   #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   #toast.error { background: var(--danger); color: #fff; }
-</style>
+
+  /* ---------- Connect / QR ---------- */
+  .qr { display: grid; place-items: center; margin-top: 12px; }
+  .qr svg { width: min(240px, 70vw); height: auto; aspect-ratio: 1; background: #fff; border-radius: 12px; padding: 6px; }

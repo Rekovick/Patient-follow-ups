@@ -1,10 +1,13 @@
 /**
- * Surgery Follow-ups — backend (Google Apps Script).
+ * Surgery Follow-ups — data server (Google Apps Script).
  *
- * Everything is stored in the Google Drive of the account that deploys the app.
- * It is created automatically the first time the app is opened:
+ * The app itself is a separate installable web app (the docs/ folder, hosted on GitHub Pages).
+ * It talks to this script over HTTPS; every request must carry a valid access key.
  *
- *   Surgery Follow-ups/                  <- share THIS folder to give someone access
+ * Everything is stored in the Google Drive of the account that deploys this script.
+ * It is created automatically by setup():
+ *
+ *   Surgery Follow-ups/
  *     Surgery Follow-ups — Data          <- Google Sheet ("Patients" + "Lists" tabs)
  *     Photos/
  *       <Patient name> (<id>)/           <- full-size photos of each patient
@@ -17,6 +20,7 @@ const PHOTO_KINDS = ['decision', 'preop', 'postop'];
 const SHEET_PATIENTS = 'Patients';
 const SHEET_LISTS = 'Lists';
 const SCHEMA_VERSION = 1;
+const APP_URL = 'https://rekovick.github.io/Patient-follow-ups/';
 
 const PATIENT_COLUMNS = [
   'id', 'name', 'phone', 'hospital', 'consultant', 'classification', 'status',
@@ -60,36 +64,82 @@ const LIST_DEFS = [
 // Web app entry points
 // ---------------------------------------------------------------------------
 
+/** The app sends POST requests: {key, fn, args}. The reply is JSON: {ok, result} or {ok: false, error}. */
+const API = {
+  getBootstrap: getBootstrap_,
+  getPatients: getPatients_,
+  createPatient: createPatient_,
+  updatePatient: updatePatient_,
+  deletePatient: deletePatient_,
+  uploadPhoto: uploadPhoto_,
+  deletePhoto: deletePhoto_,
+  getPhotoData: getPhotoData_,
+  addNote: addNote_,
+  deleteNote: deleteNote_,
+  saveLists: saveLists_,
+  listPeople: listPeople_,
+  addPerson: addPerson_,
+  removePerson: removePerson_,
+};
+
+/** The person whose access key signed the current request. */
+let REQUEST_PERSON_ = null;
+
+function doPost(e) {
+  let reply;
+  try {
+    const req = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    const person = findPersonByKey_(req.key);
+    if (!person) {
+      Utilities.sleep(400); // slows down anyone guessing keys
+      throw new Error('ACCESS_DENIED');
+    }
+    if (!Object.prototype.hasOwnProperty.call(API, req.fn)) throw new Error('Unknown action: ' + req.fn);
+    REQUEST_PERSON_ = person;
+    reply = { ok: true, result: API[req.fn].apply(null, Array.isArray(req.args) ? req.args : []) };
+  } catch (err) {
+    reply = { ok: false, error: String((err && err.message) || err) };
+  } finally {
+    REQUEST_PERSON_ = null;
+  }
+  return ContentService.createTextOutput(JSON.stringify(reply)).setMimeType(ContentService.MimeType.JSON);
+}
+
 function doGet() {
-  // The single-file installer (install/Code.gs) embeds the page as APP_HTML;
-  // the multi-file project builds it from Index/Styles/Client instead.
-  const page = typeof APP_HTML === 'string'
-    ? HtmlService.createHtmlOutput(APP_HTML)
-    : HtmlService.createTemplateFromFile('Index').evaluate();
-  return page
-    .setTitle(APP_TITLE)
-    .addMetaTag('viewport', 'width=device-width, initial-scale=1, viewport-fit=cover');
+  return ContentService.createTextOutput(
+    APP_TITLE + ' server is running. Open the app at ' + APP_URL + ' and connect it with your access key.');
 }
 
-function include(name) {
-  return HtmlService.createHtmlOutputFromFile(name).getContent();
-}
-
-/** Run this once from the editor to create the Sheet + Drive folder and grant permissions. */
+/**
+ * Run this from the editor: creates the Sheet + Drive folder (first time only) and an access key
+ * for you, then prints what you need to connect the app.
+ */
 function setup() {
   const store = openStore_();
+  let owner = readPeople_().find(p => p.admin);
+  if (!owner) owner = createPerson_(ownerName_(), true);
   Logger.log('Data sheet: ' + store.ss.getUrl());
   Logger.log('Drive folder: ' + DriveApp.getFolderById(store.ids.ROOT_FOLDER_ID).getUrl());
+  Logger.log('Open the app: ' + APP_URL);
+  Logger.log('Your ACCESS KEY (keep it private): ' + owner.key);
+}
+
+/** Run this from the editor if a key may have leaked: removes everyone's access and makes a new key for you. */
+function resetAccessKeys() {
+  withLock_(() => PropertiesService.getScriptProperties().deleteProperty('ACCESS_KEYS'));
+  const owner = createPerson_(ownerName_(), true);
+  Logger.log('All devices are disconnected. Your NEW ACCESS KEY: ' + owner.key);
 }
 
 // ---------------------------------------------------------------------------
-// Public API — called from the browser with google.script.run
+// API — reached only through doPost with a valid key
 // ---------------------------------------------------------------------------
 
-function getBootstrap() {
+function getBootstrap_() {
   const store = openStore_();
   return {
     user: currentUser_(),
+    isAdmin: !!(REQUEST_PERSON_ && REQUEST_PERSON_.admin),
     lists: readLists_(store.ss),
     patients: readPatients_(store.ss),
     spreadsheetUrl: store.ss.getUrl(),
@@ -98,11 +148,11 @@ function getBootstrap() {
   };
 }
 
-function getPatients() {
+function getPatients_() {
   return readPatients_(openStore_().ss);
 }
 
-function createPatient(data) {
+function createPatient_(data) {
   const store = openStore_();
   return withLock_(() => {
     const sh = store.ss.getSheetByName(SHEET_PATIENTS);
@@ -126,7 +176,7 @@ function createPatient(data) {
   });
 }
 
-function updatePatient(id, fields) {
+function updatePatient_(id, fields) {
   const store = openStore_();
   return mutatePatient_(store, id, (p, ctx) => {
     const oldStatus = p.status;
@@ -142,7 +192,7 @@ function updatePatient(id, fields) {
   });
 }
 
-function deletePatient(id) {
+function deletePatient_(id) {
   const store = openStore_();
   const removed = withLock_(() => {
     const sh = store.ss.getSheetByName(SHEET_PATIENTS);
@@ -163,7 +213,7 @@ function deletePatient(id) {
   return true;
 }
 
-function uploadPhoto(id, kind, photo) {
+function uploadPhoto_(id, kind, photo) {
   if (PHOTO_KINDS.indexOf(kind) < 0) throw new Error('Unknown photo type: ' + kind);
   const store = openStore_();
   const current = getPatientById_(store, id);
@@ -186,7 +236,7 @@ function uploadPhoto(id, kind, photo) {
   });
 }
 
-function deletePhoto(id, kind, fileId) {
+function deletePhoto_(id, kind, fileId) {
   const store = openStore_();
   let removed = null;
   const p = mutatePatient_(store, id, (pt) => {
@@ -202,7 +252,7 @@ function deletePhoto(id, kind, fileId) {
 }
 
 /** Returns {fileId: dataUrl} for the requested Drive images (thumbnails or full size). */
-function getPhotoData(fileIds) {
+function getPhotoData_(fileIds) {
   openStore_();
   const out = {};
   (fileIds || []).slice(0, 40).forEach(fid => {
@@ -216,7 +266,7 @@ function getPhotoData(fileIds) {
   return out;
 }
 
-function addNote(id, text) {
+function addNote_(id, text) {
   const clean = String(text || '').trim().slice(0, 4000);
   if (!clean) throw new Error('Note is empty.');
   const store = openStore_();
@@ -231,14 +281,14 @@ function addNote(id, text) {
   });
 }
 
-function deleteNote(id, noteId) {
+function deleteNote_(id, noteId) {
   const store = openStore_();
   return mutatePatient_(store, id, (p) => {
     p.notes = p.notes.filter(n => n.id !== noteId);
   });
 }
 
-function saveLists(lists) {
+function saveLists_(lists) {
   const store = openStore_();
   return withLock_(() => {
     const clean = {};
@@ -476,6 +526,73 @@ function dataUrlToBlob_(dataUrl, name) {
 }
 
 // ---------------------------------------------------------------------------
+// People and access keys (stored in Script Properties, never in the Sheet)
+// ---------------------------------------------------------------------------
+
+function listPeople_() {
+  requireAdmin_();
+  return readPeople_().map(publicPerson_);
+}
+
+/** Creates a key for a colleague. The key is returned once so the app can build their connect link. */
+function addPerson_(name) {
+  requireAdmin_();
+  const clean = String(name || '').trim().slice(0, 60);
+  if (!clean) throw new Error('Enter a name.');
+  const p = createPerson_(clean, false);
+  return { person: publicPerson_(p), key: p.key };
+}
+
+function removePerson_(id) {
+  requireAdmin_();
+  if (REQUEST_PERSON_ && REQUEST_PERSON_.id === id) throw new Error('You can’t remove your own access.');
+  withLock_(() => writePeople_(readPeople_().filter(p => p.id !== id)));
+  return readPeople_().map(publicPerson_);
+}
+
+function requireAdmin_() {
+  if (!REQUEST_PERSON_ || !REQUEST_PERSON_.admin) throw new Error('Only the owner can manage who has access.');
+}
+
+function readPeople_() {
+  const raw = PropertiesService.getScriptProperties().getProperty('ACCESS_KEYS');
+  const list = parseJson_(raw, []);
+  return Array.isArray(list) ? list : [];
+}
+
+function writePeople_(list) {
+  PropertiesService.getScriptProperties().setProperty('ACCESS_KEYS', JSON.stringify(list));
+}
+
+function createPerson_(name, admin) {
+  return withLock_(() => {
+    const p = {
+      id: newId_(),
+      name: name,
+      key: (Utilities.getUuid() + Utilities.getUuid()).replace(/-/g, ''),
+      admin: !!admin,
+      createdAt: nowIso_(),
+    };
+    writePeople_(readPeople_().concat([p]));
+    return p;
+  });
+}
+
+function ownerName_() {
+  const email = Session.getEffectiveUser().getEmail() || '';
+  return email.split('@')[0] || 'Owner';
+}
+
+function findPersonByKey_(key) {
+  if (typeof key !== 'string' || key.length < 32) return null;
+  return readPeople_().find(p => p.key === key) || null;
+}
+
+function publicPerson_(p) {
+  return { id: p.id, name: p.name, admin: !!p.admin, createdAt: p.createdAt };
+}
+
+// ---------------------------------------------------------------------------
 // Small utilities
 // ---------------------------------------------------------------------------
 
@@ -494,6 +611,7 @@ function trash_(getter) {
 }
 
 function currentUser_() {
+  if (REQUEST_PERSON_) return REQUEST_PERSON_.name;
   return Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail() || '';
 }
 

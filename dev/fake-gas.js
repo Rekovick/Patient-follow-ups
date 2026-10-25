@@ -200,6 +200,7 @@
   }
 
   global.Utilities = {
+    sleep: function () {},
     formatDate: formatDate,
     getUuid: function () {
       return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
@@ -226,6 +227,7 @@
     getScriptProperties: function () {
       return {
         getProperties: function () { return Object.assign({}, db.props); },
+        deleteProperty: function (k) { delete db.props[k]; persist(); return this; },
         getProperty: function (k) { return db.props[k] || null; },
         setProperty: function (k, v) { db.props[k] = String(v); persist(); return this; },
         setProperties: function (o) { Object.keys(o).forEach(k => { db.props[k] = String(o[k]); }); persist(); return this; },
@@ -242,45 +244,31 @@
 
   global.Logger = { log: function () { console.log.apply(console, arguments); } };
 
-  // ---------------------------------------------------------------- google.script.*
+  global.ContentService = {
+    MimeType: { JSON: 'application/json', TEXT: 'text/plain' },
+    createTextOutput: function (text) {
+      return {
+        text: text,
+        setMimeType: function () { return this; },
+        getContent: function () { return this.text; },
+      };
+    },
+  };
+
+  // ---------------------------------------------------------------- HTTPS bridge
+  // Requests from the app to "fake:server" are answered by Code.gs's real doPost().
 
   const LATENCY = global.FAKE_LATENCY === undefined ? 250 : global.FAKE_LATENCY;
+  const realFetch = global.fetch ? global.fetch.bind(global) : null;
 
-  function makeRunner(success, failure) {
-    return new Proxy({}, {
-      get: function (_, name) {
-        if (name === 'withSuccessHandler') return fn => makeRunner(fn, failure);
-        if (name === 'withFailureHandler') return fn => makeRunner(success, fn);
-        return function () {
-          const args = JSON.parse(JSON.stringify(Array.prototype.slice.call(arguments)));
-          setTimeout(() => {
-            try {
-              const fn = global[name];
-              if (typeof fn !== 'function' || /_$/.test(name)) throw new Error('Script function not found: ' + name);
-              const res = fn.apply(null, args);
-              if (success) success(res === undefined ? null : JSON.parse(JSON.stringify(res)));
-            } catch (e) {
-              console.error(e);
-              if (failure) failure(e);
-            }
-          }, LATENCY);
-        };
-      },
+  global.fetch = function (url, opts) {
+    if (String(url).indexOf('fake:') !== 0) return realFetch(url, opts);
+    return new Promise(resolve => {
+      setTimeout(() => {
+        const out = global.doPost({ postData: { contents: (opts && opts.body) || '' } });
+        resolve(new Response(out.getContent(), { headers: { 'Content-Type': 'application/json' } }));
+      }, LATENCY);
     });
-  }
-
-  let changeHandler = null;
-  global.addEventListener('popstate', e => { if (changeHandler) changeHandler({ state: e.state }); });
-
-  global.google = {
-    script: {
-      get run() { return makeRunner(null, null); },
-      history: {
-        push: function (state) { history.pushState(state, ''); },
-        replace: function (state) { history.replaceState(state, ''); },
-        setChangeHandler: function (fn) { changeHandler = fn; },
-      },
-    },
   };
 
   global.fakeGas = {

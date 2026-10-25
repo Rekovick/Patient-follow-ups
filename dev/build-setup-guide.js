@@ -1,21 +1,19 @@
 #!/usr/bin/env node
 /*
- * Builds dev/setup-guide.html: a step-by-step launch page with a copy button for the
- * single-file installer (install/Code.gs, rebuilt here too), so no GitHub is needed.
+ * Builds dev/setup-guide.html: the step-by-step launch page, with a copy button for
+ * apps-script/Code.gs (the data server) and links for turning on the installable app.
  *   node dev/build-setup-guide.js
  */
 const fs = require('fs');
 const path = require('path');
 
-// The whole app as one file (see dev/build-installer.js), so there is only one thing to paste.
-const installer = require('./build-installer.js').build();
-fs.mkdirSync(path.join(__dirname, '..', 'install'), { recursive: true });
-fs.writeFileSync(path.join(__dirname, '..', 'install', 'Code.gs'), installer);
+const code = fs.readFileSync(path.join(__dirname, '..', 'apps-script', 'Code.gs'), 'utf8');
+const APP_URL = /const APP_URL = '([^']+)'/.exec(code)[1];
 const data = [{
   editorName: 'Code.gs',
-  how: 'In the editor, click inside <code>Code.gs</code>, press <b>Ctrl + A</b> (select all) and <b>Delete</b> so it is completely empty, then <b>Ctrl + V</b> to paste.',
-  text: installer,
-  lines: installer.split('\n').length,
+  how: 'In the editor, click inside <code>Code.gs</code>, press <b>Ctrl + A</b> and <b>Delete</b> so it is completely empty, then <b>Ctrl + V</b>.',
+  text: code,
+  lines: code.split('\n').length,
 }];
 const json = JSON.stringify(data).replace(/</g, '\\u003c');
 
@@ -94,75 +92,77 @@ const html = `<title>Follow-ups Launch Kit</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=Source+Sans+3:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap">
 
 <main>
-  <h1>Launch Surgery Follow-ups</h1>
-  <p class="lede">Install the app in your own Google account. Your patients go into a Google Sheet and their photos into a Drive folder that only you can open.</p>
-  <div class="meta"><span class="pill">About 10 minutes</span><span class="pill">Use a computer for setup</span><span class="pill">Use the app on your phone after</span></div>
+  <h1>Make Surgery Follow-ups installable</h1>
+  <p class="lede">Google Apps Script now only stores your data, in the same Sheet and Drive folder as before. The app itself runs from its own address, so your phone can install it like a normal app. Every request needs your private access key.</p>
+  <div class="meta"><span class="pill">About 10 minutes</span><span class="pill">Steps 1–5 on a computer</span><span class="pill">Steps 6–7 on your phone</span></div>
   <div class="progress"><span id="prog-text">0 of 7 steps done</span><div class="bar"><span id="prog-bar"></span></div></div>
 
   <ol class="steps">
-    <li class="step" data-step="1"><span class="num"></span><h2>Create the project</h2><div class="body">
-      <p>Open <a href="https://script.google.com/home/projects/create" target="_blank" rel="noopener">script.google.com → New project</a>, signed in to the Google account that should own the patient data.</p>
-      <p>Click <b>Untitled project</b> at the top and rename it <code>Surgery Follow-ups</code>.</p>
-      <div class="note">If your browser is signed in to more than one Google account, use a window signed in only to this one. Apps Script often fails with several accounts.</div>
+    <li class="step" data-step="1"><span class="num"></span><h2>Replace Code.gs</h2><div class="body">
+      <p>Open your <b>Surgery Follow-ups</b> project at <a href="https://script.google.com/home" target="_blank" rel="noopener">script.google.com</a>. Press <b>Copy</b>, then replace everything in <code>Code.gs</code>.</p>
+      <div class="files" id="files"></div>
+      <p>If you made <code>Index</code>, <code>Styles</code> or <code>Client</code> files earlier, delete them (⋮ next to the file → Delete). They aren't used anymore.</p>
       <label class="tick"><input type="checkbox" id="s1"> Done</label></div></li>
 
-    <li class="step" data-step="2"><span class="num"></span><h2>Paste the app into Code.gs</h2><div class="body">
-      <p>The whole app is one file. Press <b>Copy</b>, then replace everything in <code>Code.gs</code> with it. You don't need to create any other files.</p>
-      <div class="files" id="files"></div>
-      <div class="note">Paste it <b>once</b>. When you're done, the last line of <code>Code.gs</code> should be <code>].join('\\n');</code> at about line ${data[0].lines - 1}.</div>
-      <label class="tick"><input type="checkbox" id="s2"> Pasted</label></div></li>
+    <li class="step" data-step="2"><span class="num"></span><h2>Run setup to get your access key</h2><div class="body">
+      <p>Press <b>Ctrl + S</b>. Choose <code>setup</code> in the function menu and click <b>▷ Run</b>. If Google asks for permission again, allow it the same way as before.</p>
+      <p>The log ends with a line like <i>Your ACCESS KEY (keep it private): 4f9c…</i>. Keep this tab open, because you'll paste that key in step 5.</p>
+      <div class="note">Treat the key like a password. Anyone with it, plus your server link, can open the patient list. If it ever leaks, run <code>resetAccessKeys</code> to lock everyone out and get a new one.</div>
+      <label class="tick"><input type="checkbox" id="s2"> I can see my key</label></div></li>
 
-    <li class="step" data-step="3"><span class="num"></span><h2>Save and run setup</h2><div class="body">
-      <p>Press <b>Ctrl + S</b> (<b>⌘ + S</b> on Mac). Open <code>Code.gs</code>, choose <code>setup</code> in the function menu at the top, and click <b>▷ Run</b>.</p>
-      <p>Google asks for permission:</p>
+    <li class="step" data-step="3"><span class="num"></span><h2>Update the deployment</h2><div class="body">
+      <p><b>Deploy → Manage deployments</b> → ✏️ <b>Edit</b>, then set:</p>
       <ul>
-        <li><b>Review permissions</b>, then choose your account.</li>
-        <li>On "Google hasn't verified this app", click <b>Advanced</b>, then <b>Go to Surgery Follow-ups (unsafe)</b>. The warning shows because the app is yours and Google hasn't reviewed it.</li>
-        <li>Click <b>Allow</b>.</li>
+        <li>Version: <b>New version</b></li>
+        <li>Execute as: <b>Me</b></li>
+        <li>Who has access: <b>Anyone</b> (not "Anyone with Google account")</li>
       </ul>
-      <p>When the log says <i>Execution completed</i>, a <b>Surgery Follow-ups</b> folder with the data Sheet has been created in your Drive.</p>
+      <p>Click <b>Deploy</b>. Your link stays the same and ends in <code>/exec</code>; copy it for step 5.</p>
+      <div class="note">"Anyone" only lets the app reach the server. Without the access key, the server answers every request with "access denied" and never shows patient data.</div>
       <label class="tick"><input type="checkbox" id="s3"> Done</label></div></li>
 
-    <li class="step" data-step="4"><span class="num"></span><h2>Deploy as a web app</h2><div class="body">
-      <p>Click <b>Deploy</b> (top right) → <b>New deployment</b> → the gear ⚙ next to <i>Select type</i> → <b>Web app</b>.</p>
+    <li class="step" data-step="4"><span class="num"></span><h2>Turn on the app's address (one time)</h2><div class="body">
+      <p>Open <a href="https://github.com/Rekovick/Patient-follow-ups/settings/pages" target="_blank" rel="noopener">GitHub → your repository → Settings → Pages</a> and set:</p>
       <ul>
-        <li>Description: <code>v1</code></li>
-        <li>Execute as: <b>Me</b></li>
-        <li>Who has access: <b>Only myself</b></li>
+        <li>Source: <b>Deploy from a branch</b></li>
+        <li>Branch: <b>ccr-f6ecb352-w5ka0a</b>, folder <b>/docs</b>, then <b>Save</b></li>
       </ul>
-      <p>Click <b>Deploy</b> and copy the <b>Web app URL</b>. It ends with <code>/exec</code>.</p>
-      <label class="tick"><input type="checkbox" id="s4"> Done</label></div></li>
+      <p>After about a minute, <a href="${APP_URL}" target="_blank" rel="noopener">${APP_URL.replace('https://', '')}</a> opens the app's <i>Connect this device</i> screen. This address only serves the app's screens; no patient data is stored there.</p>
+      <label class="tick"><input type="checkbox" id="s4"> The page opens</label></div></li>
 
-    <li class="step" data-step="5"><span class="num"></span><h2>Send the link to your phone</h2><div class="body">
-      <p>Email or WhatsApp the <code>/exec</code> link to yourself, then open it in <b>Chrome</b> (Android) or <b>Safari</b> (iPhone) while signed in to the same Google account.</p>
-      <label class="tick"><input type="checkbox" id="s5"> Opened on my phone</label></div></li>
+    <li class="step" data-step="5"><span class="num"></span><h2>Connect on the computer</h2><div class="body">
+      <p>On that page, paste your <b>server link</b> (step 3) and <b>access key</b> (step 2), then click <b>Connect</b>. You should see your patients.</p>
+      <label class="tick"><input type="checkbox" id="s5"> Connected</label></div></li>
 
-    <li class="step" data-step="6"><span class="num"></span><h2>Add it to your home screen</h2><div class="body">
+    <li class="step" data-step="6"><span class="num"></span><h2>Connect and install on your phone</h2><div class="body">
+      <p>On the computer, open <b>Settings</b> (top right) → <b>Connect my other device</b>. A QR code appears.</p>
       <ul>
-        <li>Android, Chrome: <b>⋮</b> → <b>Add to Home screen</b></li>
-        <li>iPhone, Safari: <b>Share</b> → <b>Add to Home Screen</b></li>
+        <li>Scan it with your phone's camera and open the link. The app connects by itself.</li>
+        <li>Android: tap <b>Install</b> at the top of the app, or Chrome <b>⋮ → Install app</b>.</li>
+        <li>iPhone: open the link in <b>Safari</b>, then <b>Share → Add to Home Screen</b>.</li>
       </ul>
-      <label class="tick"><input type="checkbox" id="s6"> Done</label></div></li>
+      <p>It now opens full-screen from its own icon, with no browser bar and no Google banner.</p>
+      <label class="tick"><input type="checkbox" id="s6"> Installed</label></div></li>
 
-    <li class="step" data-step="7"><span class="num"></span><h2>Add your first patient</h2><div class="body">
-      <p>Tap <b>Add patient</b> and go through the steps. Then open the <b>Surgery Follow-ups — Data</b> sheet in Google Drive: the patient appears there as a row.</p>
-      <label class="tick"><input type="checkbox" id="s7"> It works</label></div></li>
+    <li class="step" data-step="7"><span class="num"></span><h2>Remove the old shortcut</h2><div class="body">
+      <p>The old home-screen shortcut (the <code>script.google.com</code> link) no longer opens the app, so delete it. Then check that the phone number and WhatsApp buttons work in the new app.</p>
+      <label class="tick"><input type="checkbox" id="s7"> Done</label></div></li>
   </ol>
 
   <section class="later">
+    <div><h2>Giving a colleague access</h2>
+      <p>In the app: <b>Settings → People with access → Add a person</b>. Type their name and send them the link or QR code that appears; they open it once and install the app. Their name appears on every change they make. To take access away, remove them there, and all their devices are disconnected.</p></div>
     <div><h2>Updating the app later</h2>
-      <p>Paste the new files, save, then <b>Deploy → Manage deployments → ✏️ Edit → Version: New version → Deploy</b>. The link stays the same.</p></div>
-    <div><h2>Sharing with a colleague</h2>
       <ul>
-        <li>In Google Drive, share the <b>Surgery Follow-ups</b> folder with them as <b>Editor</b>.</li>
-        <li>In Apps Script: <b>Deploy → Manage deployments → ✏️ Edit</b>, set <i>Execute as</i> to <b>User accessing the web app</b> and <i>Who has access</i> to <b>Anyone with Google account</b>, then <b>Deploy</b>.</li>
-        <li>Send them the same link. People without access to the folder can't see any patients.</li>
+        <li><b>Screens and features</b> (the <code>docs/</code> folder): update on their own when new code is pushed. Phones pick them up the next time the app opens.</li>
+        <li><b>Data server</b> (<code>Code.gs</code>): paste the new file, then <b>Deploy → Manage deployments → ✏️ Edit → New version → Deploy</b>.</li>
       </ul></div>
     <div><h2>If something goes wrong</h2>
       <ul>
-        <li><b>"Sorry, unable to open the file at this time"</b>: the browser has several Google accounts signed in. Use a window with only the owner account.</li>
-        <li><b>"Script function not found: doGet"</b>: <code>Code.gs</code> wasn't saved. Paste it again and press Save.</li>
-        <li><b>"Syntax error … line: …"</b> when saving: <code>Code.gs</code> has something extra in it, usually the file pasted twice. Press Ctrl + A, Delete, and paste once more.</li>
+        <li><b>"Could not reach the server"</b>: the deployment's access isn't set to <b>Anyone</b>, or a new version wasn't deployed (step 3).</li>
+        <li><b>"That server link doesn't look right"</b>: use the deployment link that ends in <code>/exec</code>, not the editor's address.</li>
+        <li><b>"This access key isn't valid"</b>: the key was mistyped, reset, or that person was removed. Run <code>setup</code> again to see the owner key.</li>
+        <li><b>The app's address shows "404"</b>: GitHub Pages is still starting (wait a minute), or the branch or <code>/docs</code> folder in step 4 is wrong.</li>
       </ul></div>
   </section>
 </main>

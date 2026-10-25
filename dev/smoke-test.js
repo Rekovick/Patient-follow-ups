@@ -137,7 +137,7 @@ function assert(cond, msg) {
   await page.waitForSelector('.card');
   assert(await page.locator('.card').count() === 5, 'new patient persisted');
   const sheetRow = await page.evaluate(() => {
-    const p = getPatients().find(x => x.name === 'Test Patient');
+    const p = getPatients_().find(x => x.name === 'Test Patient');
     return { phone: p.phone, status: p.status, cls: p.classification, photos: p.photos.decision.length + p.photos.preop.length + p.photos.postop.length, items: Object.keys(p.anesthesia.items).length };
   });
   assert(sheetRow.phone === '01055554444', 'phone stored with leading zero');
@@ -168,6 +168,66 @@ function assert(cond, msg) {
   await page.click('.sheet [data-ok]');
   await page.waitForSelector('.card');
   assert(await page.locator('.card').count() === 4, 'patient deleted');
+
+  console.log('Security (server API)');
+  const api = (key, fn, args) => page.evaluate(([k, f, a]) =>
+    fetch('fake:server', { method: 'POST', body: JSON.stringify({ key: k, fn: f, args: a || [] }) }).then(r => r.json()), [key, fn, args]);
+  const ownerKey = await page.evaluate(() => window.FAKE_OWNER_KEY);
+  let r = await api('wrong-key-wrong-key-wrong-key-wrong-key', 'getBootstrap');
+  assert(!r.ok && r.error === 'ACCESS_DENIED', 'wrong key is refused');
+  r = await api(undefined, 'getPatients');
+  assert(!r.ok && r.error === 'ACCESS_DENIED', 'missing key is refused');
+  r = await api(ownerKey, 'setup');
+  assert(!r.ok && /Unknown action/.test(r.error), 'editor-only functions cannot be called remotely');
+  r = await api(ownerKey, 'getPatients');
+  assert(r.ok && r.result.length === 4, 'owner key reads patients');
+
+  console.log('People with access');
+  await page.click('[data-act="settings"]');
+  await page.waitForSelector('[data-act="add-person"]');
+  await page.click('[data-act="add-person"]');
+  await page.fill('.sheet input', 'Dr Sara');
+  await page.click('.sheet button[type="submit"]');
+  await page.waitForSelector('.sheet .qr svg');
+  const link = await page.inputValue('#connect-link');
+  assert(/#connect=[\w-]+$/.test(link), 'connect link with QR code created');
+  await shot('13-add-person');
+  await page.click('.sheet [data-close]');
+  const saraKey = await page.evaluate(() => readPeople_().find(p => p.name === 'Dr Sara').key);
+  r = await api(saraKey, 'getBootstrap');
+  assert(r.ok && r.result.user === 'Dr Sara' && r.result.isAdmin === false, 'colleague key works and is not owner');
+  r = await api(saraKey, 'listPeople');
+  assert(!r.ok && /Only the owner/.test(r.error), 'colleague cannot manage access');
+  r = await api(saraKey, 'addNote', [r.ok ? '' : (await api(ownerKey, 'getPatients')).result[0].id, 'Seen in clinic']);
+  assert(r.ok && r.result.notes.slice(-1)[0].by === 'Dr Sara', 'changes are signed with the colleague’s name');
+  await page.click('[data-act="remove-person"][data-name="Dr Sara"]');
+  await page.click('.sheet [data-ok]');
+  await page.waitForFunction(() => !document.querySelector('[data-act="remove-person"]'));
+  r = await api(saraKey, 'getBootstrap');
+  assert(!r.ok && r.error === 'ACCESS_DENIED', 'removed person is locked out');
+
+  console.log('Connect / disconnect');
+  await page.click('[data-act="disconnect"]');
+  await page.click('.sheet [data-ok]');
+  await page.waitForSelector('form[data-form="connect"]');
+  assert(await page.evaluate(() => !localStorage.getItem('surgery-followups.cache.v1')), 'disconnect removes patient data from the device');
+  await shot('14-connect');
+  await page.fill('#c-url', 'fake:server');
+  await page.fill('#c-key', 'not-the-key-not-the-key-not-the-key');
+  await page.click('form[data-form="connect"] button');
+  await page.waitForTimeout(800);
+  assert(await page.locator('form[data-form="connect"]').count() === 1, 'wrong key does not connect');
+  await page.fill('#c-key', ownerKey);
+  await page.click('form[data-form="connect"] button');
+  await page.waitForSelector('.card');
+  assert(true, 'connects with server link + key');
+  // Connect link opened on a "new" device
+  await page.evaluate(() => localStorage.removeItem('surgery-followups.connection.v1'));
+  const ownLink = await page.evaluate(k => location.href.split('#')[0] + '#connect=' +
+    btoa(JSON.stringify({ u: 'fake:server', k: k })).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''), ownerKey);
+  await page.goto(ownLink);
+  await page.waitForFunction(() => !location.hash && document.querySelector('.card'));
+  assert(!(await page.evaluate(() => location.hash)), 'connect link connects and is removed from the address bar');
 
   await page.emulateMedia({ colorScheme: 'dark' });
   await shot('12-home-dark');

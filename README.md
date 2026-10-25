@@ -1,12 +1,15 @@
 # Surgery Follow-ups
 
-A mobile-friendly app for following up patients who are being prepared for surgery.
-It runs as a **Google Apps Script web app**: all data is saved in **your own Google Drive**.
-Patient records go into a Google Sheet and photos go into a Drive folder. You can open the app
-from any phone or computer where you're signed in, and you can share it with colleagues later.
+An installable phone app for following up patients who are being prepared for surgery.
 
-There is no server to rent and no database to manage. Google's own security protects the data,
-and only accounts you give access to can open it.
+- **The app** (`docs/`) is a Progressive Web App hosted free on GitHub Pages at
+  **https://rekovick.github.io/Patient-follow-ups/**. You install it from the browser and it gets its own icon,
+  opens full-screen, and starts instantly, even with a weak signal.
+- **The data** stays in **your own Google Drive**: patient records in a Google Sheet, photos in a Drive folder.
+  A small Google Apps Script (`apps-script/Code.gs`) is the only thing that reads and writes it.
+  It rejects every request that doesn't carry a valid **access key**.
+
+There is no server to rent and no database to manage, and the GitHub site never sees patient data.
 
 ## Features
 
@@ -47,7 +50,11 @@ and only accounts you give access to can open it.
 checklist items and WhatsApp templates.
 
 **Other**
-- Dark mode, and it works well as an app on your phone's home screen.
+- Installs like a normal app (own icon, full screen) and opens instantly from the copy saved on the device.
+- **People with access**: each colleague gets their own key, their name appears on the changes they make,
+  and you can remove anyone at any time.
+- Connect a new phone by scanning a QR code from a device that's already connected.
+- Dark mode.
 - Photos are resized on the phone before upload, so they upload quickly over mobile data.
 - Changes made on another device appear automatically when you return to the app, or when you tap ⟳.
 
@@ -56,7 +63,7 @@ checklist items and WhatsApp templates.
 The first time the app runs, it creates this structure in your Google Drive:
 
 ```
-Surgery Follow-ups/                 ← share this folder to give a colleague access
+Surgery Follow-ups/
   Surgery Follow-ups — Data         ← Google Sheet
       Patients tab                  ← one row per patient
       Lists tab                     ← hospitals, consultants, statuses… (also editable in the app)
@@ -67,67 +74,76 @@ Surgery Follow-ups/                 ← share this folder to give a colleague ac
 
 You can open the Sheet at any time to review, filter or export the data (File → Download → Excel).
 
-## Setup (about 10 minutes, once)
+## Setup
 
-1. Go to **https://script.google.com** while signed in to the Google account that should own the data.
-   Click **New project** and rename it to *Surgery Follow-ups*.
-2. Open [`install/Code.gs`](install/Code.gs) (click **Raw**), copy all of it, and paste it into the editor's
-   `Code.gs`, **replacing everything** in it. This single file contains the whole app, so you don't need to create other files.
-   (The `apps-script/` folder holds the same code split into separate files for development;
-   `install/Code.gs` is generated from it with `node dev/build-setup-guide.js`.)
-3. Click **Save 💾**. Choose the `setup` function in the toolbar and click **Run**.
-   Google will ask for permission. Click **Review permissions**, choose your account, then
-   **Advanced → Go to Surgery Follow-ups (unsafe)** → **Allow**.
-   (It says "unsafe" only because the app is your own and hasn't been reviewed by Google.)
-   This creates the folder and the Sheet. The execution log shows their links.
-4. Click **Deploy → New deployment** → ⚙ **Web app**:
-   - *Execute as*: **Me**
-   - *Who has access*: **Only myself**
+The easiest way is the step-by-step launch page (built by `node dev/build-setup-guide.js`). It contains everything below with copy buttons.
 
-   Click **Deploy** and copy the **Web app URL**.
-5. Open that URL on your phone (in Chrome or Safari, signed in to the same Google account) and add it to the home screen:
-   - Android (Chrome): ⋮ → **Add to Home screen**
-   - iPhone (Safari): Share → **Add to Home Screen**
+### 1. Data server (Google Apps Script, once)
+1. At **https://script.google.com**, signed in to the Google account that should own the data, create a project
+   named *Surgery Follow-ups*.
+2. Replace everything in its `Code.gs` with [`apps-script/Code.gs`](apps-script/Code.gs). That is the only file needed.
+3. Save, choose the `setup` function and click **Run**. Allow the permissions
+   (**Advanced → Go to Surgery Follow-ups (unsafe)** → **Allow**; "unsafe" only means Google hasn't reviewed your own script).
+   This creates the folder and Sheet, and the log prints your **access key**. Keep it private.
+4. **Deploy → New deployment → Web app**, with *Execute as*: **Me** and *Who has access*: **Anyone**.
+   Copy the link that ends in `/exec`. "Anyone" only means the app can reach the server; without a key it refuses everything.
 
-### Updating the app later
-Paste the new `install/Code.gs` over the old one, then go to **Deploy → Manage deployments → ✏️ Edit → Version: New version → Deploy**.
-The URL stays the same.
+### 2. The app (GitHub Pages, once)
+In the repository: **Settings → Pages → Deploy from a branch →** choose the branch that holds this code, folder **`/docs`** → **Save**.
+After a minute, https://rekovick.github.io/Patient-follow-ups/ opens the app.
 
-## Sharing with a colleague
+### 3. Connect and install
+1. Open the app on a computer, paste the `/exec` server link and your access key, and click **Connect**.
+2. In **Settings → Connect my other device**, scan the QR code with your phone. The phone connects by itself.
+3. Install it. Android Chrome: **Install** button, or **⋮ → Install app**. iPhone Safari: **Share → Add to Home Screen**.
 
-1. In Google Drive, share the **Surgery Follow-ups** folder with the colleague as **Editor**.
-2. In Apps Script, go to **Deploy → Manage deployments → ✏️ Edit** and change:
-   - *Execute as*: **User accessing the web app**
-   - *Who has access*: **Anyone with Google account**
+### Updating later
+- App screens (`docs/`): pushing to the Pages branch is enough. Phones update the next time the app opens.
+- Data server (`apps-script/Code.gs`): paste the new file, then **Deploy → Manage deployments → ✏️ Edit → New version → Deploy**.
 
-   Click **Deploy** and send them the same URL.
-3. The first time the colleague opens it, they approve the permissions (the same "Advanced → Go to…" steps as above).
+## Giving a colleague access
 
-The data stays protected by Drive sharing. Someone who has the link but doesn't have access
-to the folder can't see any patients. To remove a person's access, stop sharing the folder with them.
-Every change records who made it (in the timeline and in the `updatedBy` column).
+In the app: **Settings → People with access → Add a person**. Type their name and send them the link or QR code.
+They open it once and install the app. Their name is recorded on every change they make (timeline, `updatedBy` column).
+**Remove** them there to disconnect all their devices immediately.
+
+If a key may have leaked, run `resetAccessKeys` in the Apps Script editor. It disconnects everyone and prints a new owner key.
+
+## Security notes
+- Only the access key unlocks the data. Keys are 64 random characters, stored in the script's private properties, never in the Sheet.
+  Wrong keys are refused and slowed down.
+- Editor-only functions (`setup`, `resetAccessKeys`) can't be called through the web.
+- Each phone keeps its key and the last downloaded patient list (not photos) so it opens instantly.
+  **Disconnect** (Settings) removes both from that device.
+- Lock your phone with a PIN or fingerprint, as you would for any app holding patient information.
 
 ## Troubleshooting
 
-- **"Sorry, unable to open the file at this time"**: this is a known Google issue when a browser is signed in to
-  **several Google accounts**. Open the link in a browser or profile that is signed in only to the owner account,
-  or make the owner account the first/default one.
+- **"Could not reach the server"**: the deployment's *Who has access* isn't **Anyone**, or the new version wasn't deployed.
+- **"This access key isn't valid"**: the key was mistyped, reset or removed. Run `setup` to see the owner key again.
+- **The app's address shows 404**: GitHub Pages is still publishing (wait a minute), or Pages isn't set to the `/docs` folder.
 - **Camera button opens the gallery instead**: some browsers ignore the camera hint. Use **Upload** and pick "Camera" there.
 - **I want to add a list item directly in the sheet**: edit the *Lists* tab and keep the header row as it is.
   The app picks up the change the next time it loads.
 
 ## Development
 
-The `dev/` folder runs the real `Code.gs` and UI in a normal browser against a fake Google Sheets/Drive,
-so you can try changes without deploying:
-
-```bash
-node dev/build-preview.js          # writes dev/preview.html (with sample patients); open it in a browser
-node dev/build-preview.js --empty  # start with no patients
-node dev/build-preview.js --artifact  # dev/demo.html, shaped for the hosted demo page
-node dev/build-setup-guide.js       # dev/setup-guide.html: install steps with copy buttons for each file
-node dev/smoke-test.js             # end-to-end test in headless Chromium (needs Playwright)
+```
+apps-script/Code.gs   data server (paste into Apps Script)
+docs/                 the installable app served by GitHub Pages (index.html, app.js, styles.css, sw.js, manifest, icons)
+dev/                  local preview, tests and generators
 ```
 
-If you prefer the command line, you can push the code with [clasp](https://github.com/google/clasp):
-`clasp create --type webapp --rootDir apps-script`, then `clasp push`.
+The `dev/` folder runs the real `docs/` app and the real `Code.gs` together in one browser page, with Google Sheets/Drive
+replaced by a fake, so you can try changes without deploying:
+
+```bash
+node dev/build-preview.js             # dev/preview.html with sample patients, already connected
+node dev/build-preview.js --empty     # start with no patients
+node dev/build-preview.js --artifact  # dev/demo.html, shaped for the hosted demo page
+node dev/build-setup-guide.js         # dev/setup-guide.html: the launch page with copy buttons
+node dev/make-icons.js                # regenerate docs/icons/*.png
+node dev/smoke-test.js                # end-to-end test in headless Chromium (needs Playwright)
+```
+
+`docs/vendor/qrcode.js` is [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) 1.4.4 (MIT).
