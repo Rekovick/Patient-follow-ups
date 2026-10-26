@@ -20,6 +20,8 @@ const PHOTO_KINDS = ['decision', 'preop', 'postop'];
 const SHEET_PATIENTS = 'Patients';
 const SHEET_LISTS = 'Lists';
 const SCHEMA_VERSION = 1;
+/** Bumped when the app needs to know what this server supports (2 = safe parallel uploads). */
+const SERVER_VERSION = 2;
 const APP_URL = 'https://rekovick.github.io/Patient-follow-ups/';
 
 const PATIENT_COLUMNS = [
@@ -118,6 +120,8 @@ function setup() {
   const store = openStore_();
   let owner = readPeople_().find(p => p.admin);
   if (!owner) owner = createPerson_(ownerName_(), true);
+  const recovered = recoverPhotos_(store);
+  if (recovered) Logger.log('Recovered ' + recovered + ' photo(s) that were in Drive but missing from the app.');
   Logger.log('Data sheet: ' + store.ss.getUrl());
   Logger.log('Drive folder: ' + DriveApp.getFolderById(store.ids.ROOT_FOLDER_ID).getUrl());
   Logger.log('Open the app: ' + APP_URL);
@@ -145,6 +149,7 @@ function getBootstrap_() {
     spreadsheetUrl: store.ss.getUrl(),
     folderUrl: DriveApp.getFolderById(store.ids.ROOT_FOLDER_ID).getUrl(),
     doneStatus: DONE_STATUS,
+    serverVersion: SERVER_VERSION,
   };
 }
 
@@ -219,7 +224,7 @@ function uploadPhoto_(id, kind, photo) {
   const current = getPatientById_(store, id);
   const folder = patientFolder_(store, current);
   const stamp = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HHmmss');
-  const base = kind + ' ' + stamp;
+  const base = kind + ' ' + stamp + ' ' + Utilities.getUuid().slice(0, 4);
   const file = folder.createFile(dataUrlToBlob_(photo.dataUrl, base + '.jpg'));
   const thumb = photo.thumbDataUrl
     ? DriveApp.getFolderById(store.ids.THUMBS_FOLDER_ID)
@@ -525,6 +530,45 @@ function dataUrlToBlob_(dataUrl, name) {
   return Utilities.newBlob(Utilities.base64Decode(m[2]), m[1], name);
 }
 
+/**
+ * Finds photos that are in a patient's Drive folder but not listed for that patient
+ * (lost by the parallel-upload bug fixed in server version 2) and adds them back.
+ */
+function recoverPhotos_(store) {
+  const thumbs = {};
+  const tit = DriveApp.getFolderById(store.ids.THUMBS_FOLDER_ID).getFiles();
+  while (tit.hasNext()) {
+    const t = tit.next();
+    (thumbs[t.getName()] = thumbs[t.getName()] || []).push(t.getId());
+  }
+  let total = 0;
+  readPatients_(store.ss).forEach(p => {
+    if (!p.folderId) return;
+    let folder;
+    try { folder = DriveApp.getFolderById(p.folderId); } catch (e) { return; }
+    const known = {};
+    PHOTO_KINDS.forEach(k => p.photos[k].forEach(ph => { known[ph.id] = true; }));
+    const found = [];
+    const it = folder.getFiles();
+    while (it.hasNext()) {
+      const f = it.next();
+      const m = /^(decision|preop|postop) /.exec(f.getName());
+      if (m && !known[f.getId()]) {
+        const t = thumbs[p.id + ' ' + f.getName()];
+        found.push({ kind: m[1], id: f.getId(), thumbId: t && t.length ? t.shift() : '', at: f.getDateCreated().toISOString() });
+      }
+    }
+    if (!found.length) return;
+    mutatePatient_(store, p.id, (pt, ctx) => {
+      found.sort((a, b) => a.at.localeCompare(b.at)).forEach(ph => {
+        pt.photos[ph.kind].push({ id: ph.id, thumbId: ph.thumbId, at: ph.at, by: ctx.user });
+      });
+    });
+    total += found.length;
+  });
+  return total;
+}
+
 // ---------------------------------------------------------------------------
 // People and access keys (stored in Script Properties, never in the Sheet)
 // ---------------------------------------------------------------------------
@@ -602,6 +646,9 @@ function withLock_(fn) {
   try {
     return fn();
   } finally {
+    // Sheets holds writes back until the script ends. Save them before letting the next request in,
+    // or it reads the row without this change and overwrites it.
+    SpreadsheetApp.flush();
     lock.releaseLock();
   }
 }

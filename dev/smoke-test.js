@@ -190,6 +190,25 @@ function assert(cond, msg) {
   r = await api(ownerKey, 'getPatients');
   assert(r.ok && r.result.length === 4, 'owner key reads patients');
 
+  r = await api(ownerKey, 'getBootstrap');
+  assert(r.ok && r.result.serverVersion === 2, 'server reports version 2 (parallel uploads allowed)');
+
+  console.log('Recovering photos lost by the old upload bug');
+  const recovered = await page.evaluate(() => {
+    const store = openStore_();
+    const p = getPatients_().find(x => x.photos.postop.length);
+    const before = p.photos.postop.length;
+    // A photo that reached Drive but was never written to the sheet, plus its thumbnail.
+    const file = DriveApp.getFolderById(p.folderId).createFile(Utilities.newBlob({ __b64: 'iVBORw0KGgo=' }, 'image/jpeg', 'postop 2026-10-26 101500.jpg'));
+    DriveApp.getFolderById(store.ids.THUMBS_FOLDER_ID).createFile(Utilities.newBlob({ __b64: 'iVBORw0KGgo=' }, 'image/jpeg', p.id + ' postop 2026-10-26 101500.jpg'));
+    setup();
+    const after = getPatients_().find(x => x.id === p.id).photos.postop;
+    const again = recoverPhotos_(store);
+    return { added: after.length - before, last: after[after.length - 1], fileId: file.getId(), again: again };
+  });
+  assert(recovered.added === 1 && recovered.last.id === recovered.fileId && recovered.last.thumbId, 'setup re-adds a photo found in Drive, with its thumbnail');
+  assert(recovered.again === 0, 'running it again adds nothing twice');
+
   console.log('People with access');
   await page.click('[data-act="settings"]');
   await page.waitForSelector('[data-act="add-person"]');
@@ -240,6 +259,7 @@ function assert(cond, msg) {
   await page.emulateMedia({ colorScheme: 'dark' });
   await shot('12-home-dark');
 
+  assert((await page.evaluate(() => fakeGasLockViolations.length)) === 0, 'every change is saved before the lock is released');
   assert(errors.length === 0, 'no console errors' + (errors.length ? ': ' + errors.join(' | ') : ''));
   await browser.close();
   console.log('\nAll checks passed. Screenshots in ' + shots);

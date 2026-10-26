@@ -1063,7 +1063,10 @@
     return p;
   }
 
-  const UPLOAD_CONCURRENCY = 3;
+  /** Parallel uploads are only safe on servers that save each change before the next one (version 2+). */
+  function uploadConcurrency() {
+    return (S.serverVersion || 1) >= 2 ? 3 : 1;
+  }
 
   /** Uploads [{kind, ph}] a few at a time in the background. Returns the number that failed. */
   async function uploadPhotos(id, uploads) {
@@ -1091,7 +1094,7 @@
     const p = getP(id);
     if (!p || !p.folderId) await uploadNext();
     const workers = [];
-    for (let i = 0; i < UPLOAD_CONCURRENCY; i++) workers.push(worker());
+    for (let i = 0; i < uploadConcurrency(); i++) workers.push(worker());
     await Promise.all(workers);
     return failed;
   }
@@ -1403,7 +1406,7 @@
       if (!S.conn || !S.lists) return;
       try {
         localStorage.setItem(CACHE_KEY, JSON.stringify({
-          user: S.user, isAdmin: S.isAdmin, lists: S.lists, patients: S.patients, doneStatus: S.doneStatus,
+          user: S.user, isAdmin: S.isAdmin, serverVersion: S.serverVersion, lists: S.lists, patients: S.patients, doneStatus: S.doneStatus,
           spreadsheetUrl: S.spreadsheetUrl, folderUrl: S.folderUrl, loadedAt: S.loadedAt,
         }));
       } catch (e) { /* storage full: the app still works online */ }
@@ -1904,6 +1907,7 @@
   function applyBootstrap(b) {
     S.user = b.user;
     S.isAdmin = !!b.isAdmin;
+    S.serverVersion = b.serverVersion || 1;
     S.lists = b.lists;
     S.patients = b.patients;
     S.doneStatus = b.doneStatus;

@@ -13,6 +13,12 @@
     if (saved) db = JSON.parse(saved);
   } catch (e) { /* fresh store */ }
 
+  // Real Sheets keeps writes pending until SpreadsheetApp.flush() or the end of the execution.
+  // Releasing the script lock while writes are pending is the bug that lost parallel uploads.
+  let unsavedWrites = 0;
+  global.fakeGasLockViolations = [];
+  function sheetWrite() { unsavedWrites++; }
+
   function persist() {
     try { localStorage.setItem(STORE_KEY, JSON.stringify(db)); } catch (e) { /* quota: keep in memory */ }
   }
@@ -52,6 +58,7 @@
         rowArr[this.col - 1 + c] = v;
       }
     }
+    sheetWrite();
     persist();
     return this;
   };
@@ -98,9 +105,9 @@
     return new Range(this, 1, 1, Math.max(1, this.getLastRow()), Math.max(1, this.getLastColumn()));
   };
   Sheet.prototype.setFrozenRows = function () { return this; };
-  Sheet.prototype.insertRowsAfter = function (after, n) { this.data.maxRows += n; persist(); return this; };
-  Sheet.prototype.deleteRow = function (row) { this.data.rows.splice(row - 1, 1); this.data.maxRows -= 1; persist(); return this; };
-  Sheet.prototype.clearContents = function () { this.data.rows = []; persist(); return this; };
+  Sheet.prototype.insertRowsAfter = function (after, n) { this.data.maxRows += n; sheetWrite(); persist(); return this; };
+  Sheet.prototype.deleteRow = function (row) { this.data.rows.splice(row - 1, 1); this.data.maxRows -= 1; sheetWrite(); persist(); return this; };
+  Sheet.prototype.clearContents = function () { this.data.rows = []; sheetWrite(); persist(); return this; };
 
   function Spreadsheet(id) { this.id = id; this.data = db.sheets[id]; }
   Spreadsheet.prototype.getId = function () { return this.id; };
@@ -122,6 +129,7 @@
   };
 
   global.SpreadsheetApp = {
+    flush: function () { unsavedWrites = 0; },
     create: function (name) {
       const id = newId('ss');
       db.sheets[id] = { name: name, tabs: [{ name: 'Sheet1', rows: [], maxRows: 1000 }] };
@@ -152,6 +160,7 @@
   };
   File.prototype.moveTo = function (folder) { db.files[this.id].parent = folder.getId(); persist(); return this; };
   File.prototype.setTrashed = function (b) { db.files[this.id].trashed = b; persist(); return this; };
+  File.prototype.getDateCreated = function () { return new Date(db.files[this.id].created || Date.now()); };
 
   function Folder(id) { this.id = id; }
   Folder.prototype.getId = function () { return this.id; };
@@ -165,9 +174,14 @@
     persist();
     return new Folder(id);
   };
+  Folder.prototype.getFiles = function () {
+    const ids = Object.keys(db.files).filter(k => db.files[k].parent === this.id && !db.files[k].folder && !db.files[k].trashed);
+    let i = 0;
+    return { hasNext: () => i < ids.length, next: () => new File(ids[i++]) };
+  };
   Folder.prototype.createFile = function (blob) {
     const id = newId('fi');
-    db.files[id] = { id: id, name: blob.name, type: blob.type, b64: blob.b64, parent: this.id };
+    db.files[id] = { id: id, name: blob.name, type: blob.type, b64: blob.b64, parent: this.id, created: Date.now() };
     persist();
     return new File(id);
   };
@@ -220,7 +234,14 @@
   };
 
   global.LockService = {
-    getScriptLock: function () { return { waitLock: function () {}, releaseLock: function () {} }; },
+    getScriptLock: function () {
+      return {
+        waitLock: function () {},
+        releaseLock: function () {
+          if (unsavedWrites) global.fakeGasLockViolations.push(new Error().stack);
+        },
+      };
+    },
   };
 
   global.PropertiesService = {
@@ -266,6 +287,7 @@
     return new Promise(resolve => {
       setTimeout(() => {
         const out = global.doPost({ postData: { contents: (opts && opts.body) || '' } });
+        unsavedWrites = 0; // the execution ended, so Sheets saves everything
         resolve(new Response(out.getContent(), { headers: { 'Content-Type': 'application/json' } }));
       }, LATENCY);
     });
