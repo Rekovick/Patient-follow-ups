@@ -106,7 +106,7 @@ function assert(cond, msg) {
     const db = fakeGas.db();
     return Object.values(db.files).filter(f => f.folder && /^Test Patient \(/.test(f.name)).length;
   });
-  assert(folders === 1, 'parallel uploads created exactly one Drive folder');
+  assert(folders === 1, 'all photos went into one Drive folder');
   assert((await page.locator('.hero .hint').textContent()).includes('cardiology'), 'hint shown');
   assert(await page.locator('input[data-anes-item]:checked').count() === 2, 'anesthesia ticks saved');
   await shot('07-patient');
@@ -118,7 +118,7 @@ function assert(cond, msg) {
   assert(await page.locator('h2:has-text("Post-op photos")').count() === 1, 'post-op section unlocked when Done');
   await page.setInputFiles('input[data-photo-kind="postop"][multiple]', ['p1', 'p2', 'p3', 'p4'].map(n => ({ name: n + '.png', mimeType: 'image/png', buffer: PNG })));
   await page.waitForFunction(() => document.querySelectorAll('.photo img').length === 7, null, { timeout: 8000 });
-  assert(await page.evaluate(() => getPatients_().find(x => x.name === 'Test Patient').photos.postop.length) === 4, 'four post-op photos uploaded side by side, none lost');
+  assert(await page.evaluate(() => getPatients_().find(x => x.name === 'Test Patient').photos.postop.length) === 4, 'four post-op photos uploaded, none lost');
   await page.fill('#note-text', 'Wound clean, follow up in 1 week');
   await page.click('[data-act="add-note"]');
   await page.waitForSelector('.note');
@@ -191,7 +191,7 @@ function assert(cond, msg) {
   assert(r.ok && r.result.length === 4, 'owner key reads patients');
 
   r = await api(ownerKey, 'getBootstrap');
-  assert(r.ok && r.result.serverVersion === 2, 'server reports version 2 (parallel uploads allowed)');
+  assert(r.ok && r.result.serverVersion === 2, 'server reports version 2');
 
   console.log('Recovering photos lost by the old upload bug');
   const recovered = await page.evaluate(() => {

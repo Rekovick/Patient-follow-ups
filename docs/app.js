@@ -1053,30 +1053,22 @@
 
   async function uploadOne(id, kind, ph) {
     const p = await call('uploadPhoto', id, kind, { dataUrl: ph.dataUrl, thumbDataUrl: ph.thumb });
-    // The server adds the photo and replies under one lock, so the last photo in this reply is ours.
     const list = p.photos[kind];
     const added = list[list.length - 1];
     if (added) S.thumbs[added.thumbId || added.id] = ph.thumb;
-    // Uploads run side by side: never let an older reply replace a newer one.
+    // Never let an older reply replace newer data (e.g. a checklist tick saved meanwhile).
     const cur = getP(id);
     if (!cur || String(p.updatedAt) >= String(cur.updatedAt)) upsert(p);
     return p;
   }
 
-  /** Parallel uploads are only safe on servers that save each change before the next one (version 2+). */
-  function uploadConcurrency() {
-    return (S.serverVersion || 1) >= 2 ? 3 : 1;
-  }
-
-  /** Uploads [{kind, ph}] a few at a time in the background. Returns the number that failed. */
+  /** Uploads [{kind, ph}] one after another in the background. Returns the number that failed. */
   async function uploadPhotos(id, uploads) {
     uploads.forEach(u => { S.pending[id + ':' + u.kind] = (S.pending[id + ':' + u.kind] || 0) + 1; });
     updateUploadBar();
     if (S.route.view === 'patient' && S.route.id === id) rerender();
-    let next = 0;
     let failed = 0;
-    async function uploadNext() {
-      const u = uploads[next++];
+    for (const u of uploads) {
       try {
         await uploadOne(id, u.kind, u.ph);
       } catch (e) {
@@ -1087,15 +1079,6 @@
       updateUploadBar();
       if (S.route.view === 'patient' && S.route.id === id) rerender();
     }
-    async function worker() {
-      while (next < uploads.length) await uploadNext();
-    }
-    // A patient's first photo creates their Drive folder, so it goes alone; the rest share that folder.
-    const p = getP(id);
-    if (!p || !p.folderId) await uploadNext();
-    const workers = [];
-    for (let i = 0; i < uploadConcurrency(); i++) workers.push(worker());
-    await Promise.all(workers);
     return failed;
   }
 
@@ -1406,7 +1389,7 @@
       if (!S.conn || !S.lists) return;
       try {
         localStorage.setItem(CACHE_KEY, JSON.stringify({
-          user: S.user, isAdmin: S.isAdmin, serverVersion: S.serverVersion, lists: S.lists, patients: S.patients, doneStatus: S.doneStatus,
+          user: S.user, isAdmin: S.isAdmin, lists: S.lists, patients: S.patients, doneStatus: S.doneStatus,
           spreadsheetUrl: S.spreadsheetUrl, folderUrl: S.folderUrl, loadedAt: S.loadedAt,
         }));
       } catch (e) { /* storage full: the app still works online */ }
@@ -1907,7 +1890,6 @@
   function applyBootstrap(b) {
     S.user = b.user;
     S.isAdmin = !!b.isAdmin;
-    S.serverVersion = b.serverVersion || 1;
     S.lists = b.lists;
     S.patients = b.patients;
     S.doneStatus = b.doneStatus;
