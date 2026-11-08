@@ -212,7 +212,8 @@ function assert(cond, msg) {
   console.log('Caller ID (Google Contacts)');
   const contacts = () => page.evaluate(() => Object.values(fakeGas.db().contacts).map(c => ({
     rn: c.resourceName, name: c.names[0].unstructuredName, phone: c.phoneNumbers[0].value, org: c.organizations[0].name,
-    group: c.memberships && c.memberships[0].contactGroupMembership.contactGroupResourceName,
+    group: (c.memberships || []).map(m => m.contactGroupMembership.contactGroupResourceName).find(g => g.indexOf('contactGroups/g') === 0),
+    myContacts: (c.memberships || []).some(m => m.contactGroupMembership.contactGroupResourceName === 'contactGroups/myContacts'),
   })));
   const byName = (list, n) => list.find(c => c.name.indexOf('🩺 ' + n) === 0);
   let cs = await contacts();
@@ -221,6 +222,15 @@ function assert(cond, msg) {
   const tp = byName(cs, 'Test Patient');
   assert(tp && tp.name === '🩺 Test Patient · Done · Trauma' && tp.phone === '+201055554444' && tp.org === 'El Mabara' && tp.group,
     'new patient got a contact: ' + (tp && tp.name));
+  assert(cs.every(c => c.myContacts && c.group), 'every patient contact is in My Contacts (so phones sync it) and in the patients group');
+  // Contacts made by the first version were only in the patients group: a sync must fix them.
+  const fixed = await page.evaluate(() => {
+    const db = fakeGas.db();
+    Object.values(db.contacts).forEach(c => { c.memberships = c.memberships.filter(m => m.contactGroupMembership.contactGroupResourceName !== 'contactGroups/myContacts'); });
+    setup();
+    return Object.values(db.contacts).every(c => c.memberships.some(m => m.contactGroupMembership.contactGroupResourceName === 'contactGroups/myContacts'));
+  });
+  assert(fixed, 'running setup moves older patient contacts into My Contacts');
   const mo = byName(cs, 'Mohamed Abdelrahman');
   await page.click('.card:has-text("Mohamed Abdelrahman")');
   await page.click('.chip[data-act="set-status"][data-value="Ready for surgery"]');

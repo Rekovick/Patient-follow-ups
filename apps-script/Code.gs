@@ -632,8 +632,10 @@ function syncAllContacts_(store) {
     if (Date.now() - started > 240000) { remaining++; return; }
     refreshContact_(store, p);
   });
+  const ids = readPatients_(store.ss).map(p => p.contactId).filter(Boolean);
+  addToMyContacts_(ids);
   return {
-    contacts: readPatients_(store.ss).filter(p => p.contactId).length,
+    contacts: ids.length,
     remaining: remaining,
     error: props.getProperty('CALLER_ID_ERROR') || '',
   };
@@ -698,8 +700,26 @@ function saveContact_(contactId, person) {
       // Deleted by hand in Contacts: make it again below.
     }
   }
-  person.memberships = [{ contactGroupMembership: { contactGroupResourceName: contactGroup_() } }];
+  // Phones only sync contacts that are in "My Contacts", so every patient goes there as well as in the patients group.
+  person.memberships = [
+    { contactGroupMembership: { contactGroupResourceName: 'contactGroups/myContacts' } },
+    { contactGroupMembership: { contactGroupResourceName: contactGroup_() } },
+  ];
   return People.People.createContact(person).resourceName;
+}
+
+/**
+ * Puts contacts into "My Contacts" so phones sync them. Contacts made by the first version of
+ * caller ID were only in the patients group, so they never reached the phone.
+ */
+function addToMyContacts_(ids) {
+  try {
+    for (let i = 0; i < ids.length; i += 500) {
+      People.ContactGroups.Members.modify({ resourceNamesToAdd: ids.slice(i, i + 500) }, 'contactGroups/myContacts');
+    }
+  } catch (e) {
+    noteContactError_(e);
+  }
 }
 
 function deleteContact_(contactId) {

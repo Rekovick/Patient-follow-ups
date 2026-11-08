@@ -316,6 +316,21 @@
         },
       },
       ContactGroups: {
+        Members: {
+          modify: function (req, groupRn) {
+            if (groupRn !== 'contactGroups/myContacts' && !db.contactGroups[groupRn]) notFound();
+            (req.resourceNamesToAdd || []).forEach(rn => {
+              const c = db.contacts[rn];
+              if (!c) return;
+              c.memberships = c.memberships || [];
+              if (!c.memberships.some(m => m.contactGroupMembership.contactGroupResourceName === groupRn)) {
+                c.memberships.push({ contactGroupMembership: { contactGroupResourceName: groupRn } });
+              }
+            });
+            persist();
+            return {};
+          },
+        },
         get: function (rn) {
           if (!db.contactGroups[rn]) notFound();
           return db.contactGroups[rn];
