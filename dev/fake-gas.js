@@ -215,6 +215,18 @@
 
   global.Utilities = {
     sleep: function () {},
+    DigestAlgorithm: { MD5: 'MD5' },
+    Charset: { UTF_8: 'UTF-8' },
+    computeDigest: function (alg, text) {
+      // Not MD5, but stable and well spread, which is all Code.gs relies on.
+      const out = [];
+      let h = 2166136261;
+      for (let round = 0; round < 16; round++) {
+        for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i) ^ round, 16777619) >>> 0;
+        out.push(((h >>> 8) & 0xff) - 128);
+      }
+      return out;
+    },
     formatDate: formatDate,
     getUuid: function () {
       return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
@@ -265,6 +277,60 @@
 
   global.Logger = { log: function () { console.log.apply(console, arguments); } };
 
+  // ---------------------------------------------------------------- People API (Google Contacts)
+  // Present unless FAKE_PEOPLE is false, to test both "service added" and "not added".
+
+  if (global.FAKE_PEOPLE !== false) {
+    db.contacts = db.contacts || {};
+    db.contactGroups = db.contactGroups || {};
+    const notFound = () => { throw new Error('API call to people.people failed with error: Requested entity was not found.'); };
+    global.People = {
+      People: {
+        get: function (rn) {
+          const c = db.contacts[rn];
+          if (!c) notFound();
+          return { resourceName: rn, etag: c.etag };
+        },
+        createContact: function (person) {
+          db.seq += 1;
+          const rn = 'people/c' + db.seq;
+          db.contacts[rn] = Object.assign(JSON.parse(JSON.stringify(person)), { resourceName: rn, etag: 'e' + db.seq });
+          persist();
+          return db.contacts[rn];
+        },
+        updateContact: function (person, rn, opts) {
+          const c = db.contacts[rn];
+          if (!c) notFound();
+          if (person.etag !== c.etag) throw new Error('failedPrecondition: etag mismatch');
+          if (!opts || !opts.updatePersonFields) throw new Error('updatePersonFields is required');
+          opts.updatePersonFields.split(',').forEach(f => { c[f] = JSON.parse(JSON.stringify(person[f])); });
+          db.seq += 1;
+          c.etag = 'e' + db.seq;
+          persist();
+          return c;
+        },
+        deleteContact: function (rn) {
+          if (!db.contacts[rn]) notFound();
+          delete db.contacts[rn];
+          persist();
+        },
+      },
+      ContactGroups: {
+        get: function (rn) {
+          if (!db.contactGroups[rn]) notFound();
+          return db.contactGroups[rn];
+        },
+        create: function (req) {
+          db.seq += 1;
+          const rn = 'contactGroups/g' + db.seq;
+          db.contactGroups[rn] = { resourceName: rn, name: req.contactGroup.name };
+          persist();
+          return db.contactGroups[rn];
+        },
+      },
+    };
+  }
+
   global.ContentService = {
     MimeType: { JSON: 'application/json', TEXT: 'text/plain' },
     createTextOutput: function (text) {
@@ -294,7 +360,7 @@
   };
 
   global.fakeGas = {
-    reset: function () { db = { props: {}, sheets: {}, files: {}, seq: 1 }; persist(); },
+    reset: function () { db = { props: {}, sheets: {}, files: {}, contacts: {}, contactGroups: {}, seq: 1 }; persist(); },
     db: function () { return db; },
   };
 })(window);

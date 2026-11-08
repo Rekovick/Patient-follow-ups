@@ -1201,7 +1201,7 @@
           '</section>';
       }).join('') +
       devicePanel() +
-      (S.isAdmin ? peoplePanel() : '') +
+      (S.isAdmin ? peoplePanel() + callerIdPanel() : '') +
       '<section class="panel"><h2>' + icon('sheet') + 'Your data</h2>' +
         '<p class="small muted">Everything is saved in the owner’s Google Drive.</p>' +
         '<div class="actions-grid" style="margin-top:12px">' +
@@ -1261,6 +1261,56 @@
         '</li>').join('') + '</ul>' +
       '<button class="btn" style="margin-top:10px" data-act="add-person">' + icon('plus') + 'Add a person</button>' +
       '</section>';
+  }
+
+  function callerIdPanel() {
+    if (!S.callerId) loadCallerId();
+    const c = S.callerId;
+    let body;
+    if (!c) {
+      body = '<div class="spinner sm"></div>';
+    } else if (!c.available) {
+      body = '<p class="small"><b>Not set up yet.</b> In Apps Script click <b>Services +</b>, add <b>People API</b>, run <b>setup</b>, then deploy a new version.</p>';
+    } else {
+      body = '<p class="small">' + (c.enabled
+          ? '<b>On</b>: ' + c.contacts + ' patient contact' + (c.contacts === 1 ? '' : 's') + ' in your Google Contacts.'
+          : '<b>Off</b>: no patients are in your contacts.') + '</p>' +
+        (c.error ? '<div class="field" style="margin-top:8px"><div class="warn">Last problem with Google Contacts: ' + esc(c.error) + '</div></div>' : '') +
+        '<div class="actions-grid" style="margin-top:10px">' + (c.enabled
+          ? '<button class="btn" data-act="callerid-sync">' + icon('refresh') + 'Sync now</button><button class="btn danger" data-act="callerid-off">Turn off</button>'
+          : '<button class="btn primary" data-act="callerid-on">' + icon('phone') + 'Turn on</button>') + '</div>';
+    }
+    return '<section class="panel"><h2>' + icon('phone') + 'Caller ID</h2>' +
+      '<p class="small muted" style="margin:-4px 0 10px">Your phone shows who’s calling, e.g. “🩺 Name · Status · Classification”. Patients are kept in a <b>Patients (Surgery Follow-ups)</b> group in your Google Contacts. They update when a patient changes and are removed when you archive or delete one.</p>' +
+      body + '</section>';
+  }
+
+  function loadCallerId() {
+    if (S.callerIdLoading) return;
+    S.callerIdLoading = true;
+    call('getCallerId').then(c => { S.callerId = c; rerender(); })
+      .catch(e => toast(errMsg(e), 'error'))
+      .then(() => { S.callerIdLoading = false; });
+  }
+
+  async function runCallerId(fn, arg, busyText) {
+    busy(busyText);
+    try {
+      let r = await (arg === undefined ? call(fn) : call(fn, arg));
+      // Large lists are synced in parts so each request stays inside Google's time limit.
+      while (r.remaining > 0) {
+        busy(busyText + ' (' + r.contacts + ' done)');
+        r = await call('syncContacts');
+      }
+      S.callerId = r;
+      busy(false);
+      toast(r.enabled ? 'Caller ID is up to date: ' + r.contacts + ' contact' + (r.contacts === 1 ? '' : 's') : 'Caller ID is off');
+      refresh(false);
+    } catch (e) {
+      busy(false);
+      toast(errMsg(e), 'error');
+    }
+    rerender();
   }
 
   function loadPeople() {
@@ -1619,7 +1669,13 @@
     },
     'open': el => navigate({ view: 'patient', id: el.dataset.id }),
     'new': () => startNew(),
-    'settings': () => { S.settingsDraft = null; navigate({ view: 'settings' }); },
+    'settings': () => { S.settingsDraft = null; S.callerId = null; navigate({ view: 'settings' }); },
+    'callerid-on': () => runCallerId('setCallerId', true, 'Adding patients to your contacts…'),
+    'callerid-sync': () => runCallerId('syncContacts', undefined, 'Syncing contacts…'),
+    'callerid-off': async () => {
+      if (!await confirmSheet({ title: 'Turn off caller ID?', text: 'All patient contacts this app made are removed from your Google Contacts. Your patient list is not affected.', ok: 'Turn off', danger: true })) return;
+      runCallerId('setCallerId', false, 'Removing patient contacts…');
+    },
     'refresh': () => refresh(true),
     'clear-q': () => { S.filters.q = ''; const q = document.getElementById('q'); if (q) { q.value = ''; q.focus(); } renderList(); },
     'clear-filters': () => {

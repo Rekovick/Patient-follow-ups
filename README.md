@@ -109,6 +109,18 @@ They open it once and install the app. Their name is recorded on every change th
 
 If a key may have leaked, run `resetAccessKeys` in the Apps Script editor. It disconnects everyone and prints a new owner key.
 
+## Caller ID
+
+When a patient calls, your phone shows e.g. **🩺 Mohamed Abdelrahman · Waiting for labs · Vascular**. You don't save anyone by hand.
+The data server keeps a **Patients (Surgery Follow-ups)** group in the owner's Google Contacts in step with the app:
+it adds a contact for each patient, updates it when the name, phone, status or classification changes, and removes it
+when the patient is archived or deleted. Opening the contact shows the hospital, consultant, procedure and hint.
+
+To turn it on: in the Apps Script editor click **Services +**, add **People API** (keep the name `People`), run `setup`
+(allow the new Contacts permission) and deploy a new version. **Settings → Caller ID** in the app shows how many contacts
+there are and the last problem, if any. Use **Sync now** to bring them up to date, or **Turn off** to remove them all.
+Contacts go to the owner's Google account only, so colleagues' phones are not affected.
+
 ## Security notes
 - Only the access key unlocks the data. Keys are 64 random characters, stored in the script's private properties, never in the Sheet.
   Wrong keys are refused and slowed down.

@@ -19,7 +19,7 @@ const DONE_STATUS = 'Done';
 const PHOTO_KINDS = ['decision', 'preop', 'postop'];
 const SHEET_PATIENTS = 'Patients';
 const SHEET_LISTS = 'Lists';
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 /** Bumped when the app needs to know what this server supports (2 = safe parallel uploads). */
 const SERVER_VERSION = 2;
 const APP_URL = 'https://rekovick.github.io/Patient-follow-ups/';
@@ -28,6 +28,7 @@ const PATIENT_COLUMNS = [
   'id', 'name', 'phone', 'hospital', 'consultant', 'classification', 'status',
   'surgeryDate', 'age', 'procedure', 'hint', 'anesthesia', 'photos', 'notes',
   'history', 'archived', 'folderId', 'createdAt', 'createdBy', 'updatedAt', 'updatedBy',
+  'contactId', 'contactSig',
 ];
 const JSON_COLUMNS = ['anesthesia', 'photos', 'notes', 'history'];
 const EDITABLE_FIELDS = [
@@ -82,6 +83,9 @@ const API = {
   listPeople: listPeople_,
   addPerson: addPerson_,
   removePerson: removePerson_,
+  getCallerId: getCallerId_,
+  setCallerId: setCallerId_,
+  syncContacts: syncContacts_,
 };
 
 /** The person whose access key signed the current request. */
@@ -122,6 +126,12 @@ function setup() {
   if (!owner) owner = createPerson_(ownerName_(), true);
   const recovered = recoverPhotos_(store);
   if (recovered) Logger.log('Recovered ' + recovered + ' photo(s) that were in Drive but missing from the app.');
+  if (!callerIdAvailable_()) {
+    Logger.log('Caller ID is off: add the People API service (Services +) to show patients on your call screen.');
+  } else if (callerIdEnabled_()) {
+    const r = syncAllContacts_(store);
+    Logger.log('Caller ID: ' + r.contacts + ' patient contact(s) in Google Contacts' + (r.error ? ' — problem: ' + r.error : '.'));
+  }
   Logger.log('Data sheet: ' + store.ss.getUrl());
   Logger.log('Drive folder: ' + DriveApp.getFolderById(store.ids.ROOT_FOLDER_ID).getUrl());
   Logger.log('Open the app: ' + APP_URL);
@@ -159,7 +169,7 @@ function getPatients_() {
 
 function createPatient_(data) {
   const store = openStore_();
-  return withLock_(() => {
+  const created = withLock_(() => {
     const sh = store.ss.getSheetByName(SHEET_PATIENTS);
     const headers = headers_(sh);
     const now = nowIso_();
@@ -179,11 +189,12 @@ function createPatient_(data) {
       .setValues([patientToRow_(headers, p, null)]);
     return p;
   });
+  return refreshContact_(store, created);
 }
 
 function updatePatient_(id, fields) {
   const store = openStore_();
-  return mutatePatient_(store, id, (p, ctx) => {
+  const updated = mutatePatient_(store, id, (p, ctx) => {
     const oldStatus = p.status;
     const oldName = p.name;
     applyEdits_(p, fields);
@@ -195,6 +206,7 @@ function updatePatient_(id, fields) {
       try { DriveApp.getFolderById(p.folderId).setName(folderName_(p)); } catch (e) { /* folder gone */ }
     }
   });
+  return refreshContact_(store, updated);
 }
 
 function deletePatient_(id) {
@@ -211,6 +223,9 @@ function deletePatient_(id) {
   if (removed) {
     // Files go to the Drive trash, so they can still be recovered for 30 days.
     if (removed.folderId) trash_(() => DriveApp.getFolderById(removed.folderId));
+    if (removed.contactId && callerIdAvailable_()) {
+      try { deleteContact_(removed.contactId); } catch (e) { noteContactError_(e); }
+    }
     PHOTO_KINDS.forEach(kind => removed.photos[kind].forEach(ph => {
       if (ph.thumbId) trash_(() => DriveApp.getFileById(ph.thumbId));
     }));
@@ -412,7 +427,7 @@ function getPatientById_(store, id) {
 }
 
 /** Read-modify-write of one patient row under a lock, so edits from several devices merge safely. */
-function mutatePatient_(store, id, fn) {
+function mutatePatient_(store, id, fn, opts) {
   return withLock_(() => {
     const sh = store.ss.getSheetByName(SHEET_PATIENTS);
     const headers = headers_(sh);
@@ -423,8 +438,10 @@ function mutatePatient_(store, id, fn) {
     const p = rowToPatient_(headers, existing);
     const ctx = { now: nowIso_(), user: currentUser_() };
     fn(p, ctx);
-    p.updatedAt = ctx.now;
-    p.updatedBy = ctx.user;
+    if (!(opts && opts.bookkeeping)) {
+      p.updatedAt = ctx.now;
+      p.updatedBy = ctx.user;
+    }
     range.setValues([patientToRow_(headers, p, existing)]);
     return p;
   });
@@ -567,6 +584,156 @@ function recoverPhotos_(store) {
     total += found.length;
   });
   return total;
+}
+
+// ---------------------------------------------------------------------------
+// Caller ID: a "Patients" group in the owner's Google Contacts, kept in step with the patient list,
+// so the phone shows who is calling. Needs the People API advanced service (Services + in the editor).
+// ---------------------------------------------------------------------------
+
+const CONTACT_GROUP_NAME = 'Patients (Surgery Follow-ups)';
+const CONTACT_PERSON_FIELDS = 'names,phoneNumbers,organizations,biographies';
+
+function getCallerId_() {
+  requireAdmin_();
+  const store = openStore_();
+  const props = PropertiesService.getScriptProperties();
+  return {
+    available: callerIdAvailable_(),
+    enabled: callerIdEnabled_(),
+    contacts: readPatients_(store.ss).filter(p => p.contactId).length,
+    error: props.getProperty('CALLER_ID_ERROR') || '',
+  };
+}
+
+function setCallerId_(enabled) {
+  requireAdmin_();
+  if (enabled && !callerIdAvailable_()) throw new Error('Add the People API service in Apps Script first (Services +), then run setup.');
+  PropertiesService.getScriptProperties().setProperty('CALLER_ID', enabled ? 'on' : 'off');
+  return syncContacts_();
+}
+
+/** Brings every patient's contact up to date (or removes them all when caller ID is off). */
+function syncContacts_() {
+  requireAdmin_();
+  const r = syncAllContacts_(openStore_());
+  return Object.assign(getCallerId_(), { remaining: r.remaining });
+}
+
+function syncAllContacts_(store) {
+  if (!callerIdAvailable_()) return { contacts: 0, remaining: 0, error: '' };
+  const started = Date.now();
+  const props = PropertiesService.getScriptProperties();
+  props.deleteProperty('CALLER_ID_ERROR');
+  const patients = readPatients_(store.ss);
+  let remaining = 0;
+  patients.forEach(p => {
+    // Stay well inside Apps Script's time limit; the app asks again for the rest.
+    if (Date.now() - started > 240000) { remaining++; return; }
+    refreshContact_(store, p);
+  });
+  return {
+    contacts: readPatients_(store.ss).filter(p => p.contactId).length,
+    remaining: remaining,
+    error: props.getProperty('CALLER_ID_ERROR') || '',
+  };
+}
+
+function callerIdAvailable_() {
+  return typeof People !== 'undefined';
+}
+
+function callerIdEnabled_() {
+  return callerIdAvailable_() && PropertiesService.getScriptProperties().getProperty('CALLER_ID') !== 'off';
+}
+
+/** What the contact should look like, or null when the patient should have none. */
+function contactFor_(p) {
+  const digits = String(p.phone || '').replace(/\D/g, '');
+  if (p.archived || !digits) return null;
+  const intl = '+' + (digits.charAt(0) === '0' ? '2' + digits : '20' + digits);
+  const label = ['🩺 ' + p.name, p.status, p.classification].filter(Boolean).join(' · ');
+  const notes = [p.hint, p.hospital + ' — ' + p.consultant, p.procedure, 'Surgery Follow-ups ' + p.id].filter(Boolean).join('\n');
+  return {
+    names: [{ unstructuredName: label }],
+    phoneNumbers: [{ value: intl, type: 'mobile' }],
+    organizations: [{ name: p.hospital, title: p.consultant }],
+    biographies: [{ value: notes, contentType: 'TEXT_PLAIN' }],
+  };
+}
+
+/**
+ * Creates, updates or removes one patient's contact when it no longer matches, and records the
+ * result on the patient row. Never throws: a Contacts problem must not stop a patient being saved.
+ * Returns the patient as now stored.
+ */
+function refreshContact_(store, p) {
+  if (!callerIdAvailable_()) return p;
+  try {
+    const want = callerIdEnabled_() ? contactFor_(p) : null;
+    const sig = want ? digest_(JSON.stringify(want)) : '';
+    if (sig === p.contactSig && !!want === !!p.contactId) return p;
+    let contactId = '';
+    if (want) contactId = saveContact_(p.contactId, want);
+    else if (p.contactId) deleteContact_(p.contactId);
+    return mutatePatient_(store, p.id, pt => {
+      pt.contactId = contactId;
+      pt.contactSig = sig;
+    }, { bookkeeping: true });
+  } catch (e) {
+    noteContactError_(e);
+    return p;
+  }
+}
+
+function saveContact_(contactId, person) {
+  if (contactId) {
+    try {
+      const current = People.People.get(contactId, { personFields: 'metadata' });
+      person.etag = current.etag;
+      People.People.updateContact(person, contactId, { updatePersonFields: CONTACT_PERSON_FIELDS });
+      return contactId;
+    } catch (e) {
+      if (!/not found|404/i.test(String(e && e.message))) throw e;
+      // Deleted by hand in Contacts: make it again below.
+    }
+  }
+  person.memberships = [{ contactGroupMembership: { contactGroupResourceName: contactGroup_() } }];
+  return People.People.createContact(person).resourceName;
+}
+
+function deleteContact_(contactId) {
+  try {
+    People.People.deleteContact(contactId);
+  } catch (e) {
+    if (!/not found|404/i.test(String(e && e.message))) throw e;
+  }
+}
+
+let CONTACT_GROUP_ = null;
+function contactGroup_() {
+  if (CONTACT_GROUP_) return CONTACT_GROUP_;
+  const props = PropertiesService.getScriptProperties();
+  const saved = props.getProperty('CONTACT_GROUP_ID');
+  if (saved) {
+    try {
+      CONTACT_GROUP_ = People.ContactGroups.get(saved).resourceName;
+      return CONTACT_GROUP_;
+    } catch (e) { /* group was deleted: create it again */ }
+  }
+  CONTACT_GROUP_ = People.ContactGroups.create({ contactGroup: { name: CONTACT_GROUP_NAME } }).resourceName;
+  props.setProperty('CONTACT_GROUP_ID', CONTACT_GROUP_);
+  return CONTACT_GROUP_;
+}
+
+function noteContactError_(e) {
+  const msg = String((e && e.message) || e).slice(0, 300);
+  PropertiesService.getScriptProperties().setProperty('CALLER_ID_ERROR', msg);
+}
+
+function digest_(text) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, text, Utilities.Charset.UTF_8)
+    .map(b => ('0' + (b & 0xff).toString(16)).slice(-2)).join('').slice(0, 16);
 }
 
 // ---------------------------------------------------------------------------

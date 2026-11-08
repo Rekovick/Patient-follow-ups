@@ -83,6 +83,10 @@ const html = `<title>Follow-ups Launch Kit</title>
   textarea.fallback { width: 100%; height: 160px; margin-top: 10px; font: 12px var(--font-mono); background: var(--surface); color: var(--ink);
     border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
   a { color: var(--accent); font-weight: 600; }
+  .whatsnew { margin-top: 24px; background: var(--surface); border: 2px solid var(--accent); border-radius: 14px; padding: 18px; }
+  .whatsnew h2 { font-size: 20px; }
+  .whatsnew p { margin: 8px 0 0; }
+  .whatsnew ol { margin: 10px 0 0; padding-left: 22px; display: grid; gap: 8px; }
   .later { margin-top: 32px; padding-top: 20px; border-top: 1px solid var(--line); display: grid; gap: 18px; }
   .later h2 { font-size: 20px; }
   .later p, .later li { color: var(--muted); }
@@ -96,6 +100,20 @@ const html = `<title>Follow-ups Launch Kit</title>
   <p class="lede">Google Apps Script now only stores your data, in the same Sheet and Drive folder as before. The app itself runs from its own address, so your phone can install it like a normal app. Every request needs your private access key.</p>
   <div class="meta"><span class="pill">About 10 minutes</span><span class="pill">Steps 1–5 on a computer</span><span class="pill">Steps 6–7 on your phone</span></div>
   <div class="progress"><span id="prog-text">0 of 7 steps done</span><div class="bar"><span id="prog-bar"></span></div></div>
+
+  <section class="whatsnew">
+    <h2>New: caller ID for patients</h2>
+    <p>Your phone can show who's calling, e.g. <b>🩺 Mohamed Abdelrahman · Waiting for labs · Vascular</b>, without you saving anyone. The app keeps a <b>Patients (Surgery Follow-ups)</b> group in your Google Contacts: it adds each patient, updates them when anything changes, and removes them when you archive or delete the patient. On a computer:</p>
+    <ol>
+      <li>Open your project at <a href="https://script.google.com/home" target="_blank" rel="noopener">script.google.com</a>. Press <b>Copy</b> below, then replace everything in <code>Code.gs</code> and press <b>Ctrl + S</b>.
+        <div class="files"></div></li>
+      <li>In the left bar, click <b>+</b> next to <b>Services</b>, pick <b>People API</b>, and click <b>Add</b>. Keep the name <code>People</code>.</li>
+      <li>Choose <code>setup</code> in the function menu and click <b>▷ Run</b>. Google asks for permission again, this time including your contacts; allow it. The log shows <i>Caller ID: N patient contact(s) in Google Contacts</i>.</li>
+      <li><b>Deploy → Manage deployments → ✏️ Edit → Version: New version → Deploy.</b></li>
+    </ol>
+    <p>Your phone shows the names after Google Contacts syncs, usually within a minute. On iPhone, check <b>Settings → Contacts → Accounts → Gmail → Contacts</b> is on. You can turn caller ID off, or sync it, in the app under <b>Settings → Caller ID</b>.</p>
+    <div class="note">Anything on your phone that can read contacts sees these names, WhatsApp included. The call screen and lock screen show the patient's name and status, so keep sensitive details in the hint, not in the status.</div>
+  </section>
 
   <ol class="steps">
     <li class="step" data-step="1"><span class="num"></span><h2>Replace Code.gs</h2><div class="body">
@@ -171,11 +189,12 @@ const html = `<title>Follow-ups Launch Kit</title>
 <script>
 (function () {
   var files = JSON.parse(document.getElementById('file-data').textContent);
-  var box = document.getElementById('files');
+  // Every .files box on the page gets its own copy buttons.
+  Array.prototype.forEach.call(document.querySelectorAll('.files'), function (box, slot) {
   files.forEach(function (f, i) {
     var el = document.createElement('div');
     el.className = 'file';
-    el.innerHTML = '<div class="file-head"><span class="file-name"></span><button class="copy" type="button" id="copy-' + i + '">Copy</button></div><p></p>';
+    el.innerHTML = '<div class="file-head"><span class="file-name"></span><button class="copy" type="button" id="copy-' + slot + '-' + i + '">Copy</button></div><p></p>';
     el.querySelector('.file-name').textContent = (i + 1) + '. ' + f.editorName;
     var small = document.createElement('small');
     small.textContent = f.lines + ' lines';
@@ -208,6 +227,7 @@ const html = `<title>Follow-ups Launch Kit</title>
       }
     });
     box.appendChild(el);
+  });
   });
 
   var KEY = 'launch-kit-steps';

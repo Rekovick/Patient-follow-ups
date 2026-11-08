@@ -209,6 +209,67 @@ function assert(cond, msg) {
   assert(recovered.added === 1 && recovered.last.id === recovered.fileId && recovered.last.thumbId, 'setup re-adds a photo found in Drive, with its thumbnail');
   assert(recovered.again === 0, 'running it again adds nothing twice');
 
+  console.log('Caller ID (Google Contacts)');
+  const contacts = () => page.evaluate(() => Object.values(fakeGas.db().contacts).map(c => ({
+    rn: c.resourceName, name: c.names[0].unstructuredName, phone: c.phoneNumbers[0].value, org: c.organizations[0].name,
+    group: c.memberships && c.memberships[0].contactGroupMembership.contactGroupResourceName,
+  })));
+  const byName = (list, n) => list.find(c => c.name.indexOf('🩺 ' + n) === 0);
+  let cs = await contacts();
+  assert(cs.length === 4, 'every patient has a contact (' + cs.length + ')');
+  assert(!byName(cs, 'Ahmed Mahmoud'), 'deleted patient’s contact was removed');
+  const tp = byName(cs, 'Test Patient');
+  assert(tp && tp.name === '🩺 Test Patient · Done · Trauma' && tp.phone === '+201055554444' && tp.org === 'El Mabara' && tp.group,
+    'new patient got a contact: ' + (tp && tp.name));
+  const mo = byName(cs, 'Mohamed Abdelrahman');
+  await page.click('.card:has-text("Mohamed Abdelrahman")');
+  await page.click('.chip[data-act="set-status"][data-value="Ready for surgery"]');
+  await page.waitForFunction(rn => (fakeGas.db().contacts[rn] || {}).names[0].unstructuredName.indexOf('Ready for surgery') > 0, mo.rn);
+  assert(true, 'status change renames the same contact');
+  await page.click('[data-act="archive"]');
+  await page.waitForFunction(rn => !fakeGas.db().contacts[rn], mo.rn);
+  assert(true, 'archiving removes the contact');
+  await page.click('[data-act="archive"]');
+  await page.waitForFunction(() => Object.values(fakeGas.db().contacts).some(c => c.names[0].unstructuredName.indexOf('🩺 Mohamed') === 0));
+  assert(true, 'unarchiving brings it back');
+  // Someone deletes the contact by hand in Google Contacts: the next change makes it again.
+  await page.evaluate(() => { const db = fakeGas.db(); Object.keys(db.contacts).forEach(k => { if (db.contacts[k].names[0].unstructuredName.indexOf('🩺 Mohamed') === 0) delete db.contacts[k]; }); });
+  await page.click('.chip[data-act="set-status"][data-value="Waiting for labs"]');
+  await page.waitForFunction(() => Object.values(fakeGas.db().contacts).some(c => c.names[0].unstructuredName === '🩺 Mohamed Abdelrahman · Waiting for labs · Vascular'));
+  assert(true, 'a contact deleted by hand is made again');
+  // A Google Contacts failure never stops a patient being saved.
+  r = await page.evaluate(() => {
+    const original = People.People.createContact;
+    People.People.createContact = () => { throw new Error('Quota exceeded for contact writes'); };
+    try {
+      const out = JSON.parse(doPost({ postData: { contents: JSON.stringify({ key: window.FAKE_OWNER_KEY, fn: 'createPatient', args: [{ name: 'Quota Test', phone: '01011112222', hospital: 'El Sahel', consultant: 'General', status: 'Waiting for labs' }] }) } }).getContent());
+      return out;
+    } finally {
+      People.People.createContact = original;
+    }
+  });
+  assert(r.ok && r.result.name === 'Quota Test' && !r.result.contactId, 'patient still saved when Contacts fails');
+  await page.click('[data-act="back"]');
+  await page.click('[data-act="settings"]');
+  await page.waitForSelector('[data-act="callerid-off"]');
+  assert((await page.textContent('section:has-text("Caller ID")')).includes('Quota exceeded'), 'Settings shows the Contacts problem');
+  await page.click('[data-act="callerid-sync"]');
+  await page.waitForFunction(() => !document.querySelector('.busy'));
+  cs = await contacts();
+  assert(byName(cs, 'Quota Test') && cs.length === 5, 'Sync now fills in the missing contact');
+  await page.click('[data-act="callerid-off"]');
+  await page.click('.sheet [data-ok]');
+  await page.waitForSelector('[data-act="callerid-on"]');
+  assert((await contacts()).length === 0, 'turning caller ID off removes every patient contact');
+  await page.click('[data-act="callerid-on"]');
+  await page.waitForSelector('[data-act="callerid-sync"]');
+  assert((await contacts()).length === 5, 'turning it on adds them back');
+  await shot('16-caller-id');
+  r = await api(ownerKey, 'deletePatient', [(await api(ownerKey, 'getPatients')).result.find(x => x.name === 'Quota Test').id]);
+  assert(r.ok && (await contacts()).length === 4, 'deleting a patient removes their contact');
+  await page.click('[data-act="back"]');
+  await page.waitForSelector('.card');
+
   console.log('People with access');
   await page.click('[data-act="settings"]');
   await page.waitForSelector('[data-act="add-person"]');
