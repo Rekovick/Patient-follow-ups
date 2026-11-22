@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-/* Renders both apps' icons (docs/icons/ and docs/waitlist/icons/) from SVG designs (needs Playwright). */
+/* Renders both apps' icons (docs/app/icons/ and docs/waitlist/icons/) from SVG designs (needs Playwright). */
 const path = require('path');
 const { chromium } = require('playwright');
 
 // One design per app: the follow-up app (teal, pulse line) and the waiting list (blue, list with a plus).
 const SETS = [
   {
-    dir: 'docs/icons', from: '#14998e', to: '#0b5f58',
+    dir: 'docs/app/icons', from: '#14998e', to: '#0b5f58',
     glyph: `<path d="M86 276h86l38-96 64 190 46-120 26 26h80" stroke-width="34"/>
             <path d="M376 104v72M340 140h72" stroke-width="26"/>`,
   },

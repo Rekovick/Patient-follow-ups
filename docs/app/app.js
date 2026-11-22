@@ -1395,7 +1395,7 @@
     if (window.qrcode) return Promise.resolve(window.qrcode);
     return new Promise((resolve, reject) => {
       const s = document.createElement('script');
-      s.src = 'vendor/qrcode.js';
+      s.src = '../vendor/qrcode.js';
       s.onload = () => resolve(window.qrcode);
       s.onerror = () => reject(new Error('Could not load the QR code maker.'));
       document.head.appendChild(s);

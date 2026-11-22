@@ -22,7 +22,7 @@ const SHEET_LISTS = 'Lists';
 const SCHEMA_VERSION = 2;
 /** Bumped when the app needs to know what this server supports (2 = safe parallel uploads). */
 const SERVER_VERSION = 2;
-const APP_URL = 'https://rekovick.github.io/Patient-follow-ups/';
+const APP_URL = 'https://rekovick.github.io/Patient-follow-ups/app/';
 
 const PATIENT_COLUMNS = [
   'id', 'name', 'phone', 'hospital', 'consultant', 'classification', 'status',

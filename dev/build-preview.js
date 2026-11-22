@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * Builds dev/preview.html: the real app (docs/) running against the real Code.gs, with
+ * Builds dev/preview.html: the real app (docs/app/) running against the real Code.gs, with
  * Google Sheets/Drive replaced by an in-browser fake. Open it in any browser to try the UI.
  *   node dev/build-preview.js             -> with sample patients, already connected
  *   node dev/build-preview.js --empty     -> start with no patients
@@ -15,11 +15,11 @@ const artifact = process.argv.includes('--artifact');
 const flags = process.argv.includes('--empty') ? 'window.FAKE_SAMPLES = false;\n' : '';
 
 const backend = '<script>\n' + flags + read('dev/fake-gas.js') + '\n' + read('apps-script/Code.gs') + '\n' + read('dev/demo-seed.js') + '\n</script>\n';
-const scripts = backend + '<script>\n' + read('docs/vendor/qrcode.js') + '\n</script>\n<script>\n' + read('docs/app.js') + '\n</script>';
+const scripts = backend + '<script>\n' + read('docs/vendor/qrcode.js') + '\n</script>\n<script>\n' + read('docs/app/app.js') + '\n</script>';
 
-let html = read('docs/index.html')
+let html = read('docs/app/index.html')
   .replace(/^\s*<link rel="(manifest|icon|apple-touch-icon)"[^>]*>\n/gm, '')
-  .replace('<link rel="stylesheet" href="styles.css">', () => '<style>\n' + read('docs/styles.css') + '\n</style>')
+  .replace('<link rel="stylesheet" href="styles.css">', () => '<style>\n' + read('docs/app/styles.css') + '\n</style>')
   .replace('<script src="app.js"></script>', () => scripts)
   .replace('<title>Surgery Follow-ups</title>', '<title>Surgery Follow-ups (preview)</title>');
 

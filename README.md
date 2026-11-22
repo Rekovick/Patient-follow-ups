@@ -3,7 +3,7 @@
 An installable phone app for following up patients who are being prepared for surgery.
 
 - **The app** (`docs/`) is a Progressive Web App hosted free on GitHub Pages at
-  **https://rekovick.github.io/Patient-follow-ups/**. You install it from the browser and it gets its own icon,
+  **https://rekovick.github.io/Patient-follow-ups/app/**. You install it from the browser and it gets its own icon,
   opens full-screen, and starts instantly, even with a weak signal.
 - **The data** stays in **your own Google Drive**: patient records in a Google Sheet, photos in a Drive folder.
   A small Google Apps Script (`apps-script/Code.gs`) is the only thing that reads and writes it.
@@ -90,7 +90,7 @@ The easiest way is the step-by-step launch page (built by `node dev/build-setup-
 
 ### 2. The app (GitHub Pages, once)
 In the repository: **Settings → Pages → Deploy from a branch →** choose the branch that holds this code, folder **`/docs`** → **Save**.
-After a minute, https://rekovick.github.io/Patient-follow-ups/ opens the app.
+After a minute, https://rekovick.github.io/Patient-follow-ups/app/ opens the app (the bare `/Patient-follow-ups/` address redirects there).
 
 ### 3. Connect and install
 1. Open the app on a computer, paste the `/exec` server link and your access key, and click **Connect**.
@@ -161,11 +161,19 @@ for the team key, deploy as a web app (*Execute as* **Me**, *Who has access* **A
 **Set up a new list**. `node dev/build-waitlist-guide.js` builds the step-by-step launch page.
 If the link reaches the wrong people, run `resetTeamKey`, set up the list again in the app, and share the new link.
 
+## Two apps on one site
+
+Both apps are served from the same GitHub Pages site, so they must never overlap: each manifest has its own explicit
+`id` (`/Patient-follow-ups/app/` and `/Patient-follow-ups/waitlist/`) and its own folder as `scope`. Chrome resolves an
+`id` against the site root, so `"id": "./"` in both would make phones treat them as one app.
+
 ## Development
 
 ```
 apps-script/Code.gs   data server (paste into Apps Script)
-docs/                 the installable app served by GitHub Pages (index.html, app.js, styles.css, sw.js, manifest, icons)
+docs/app/             the installable follow-up app served by GitHub Pages (index.html, app.js, styles.css, sw.js, manifest, icons)
+docs/index.html       redirects the old address to app/ (docs/sw.js retires the old offline helper)
+docs/vendor/          shared by both apps
 docs/waitlist/        the Department Waiting List app (same layout)
 waitlist-server/Code.gs   its data server (paste into a separate Apps Script project)
 dev/                  local preview, tests and generators
@@ -179,8 +187,9 @@ node dev/build-preview.js             # dev/preview.html with sample patients, a
 node dev/build-preview.js --empty     # start with no patients
 node dev/build-preview.js --artifact  # dev/demo.html, shaped for the hosted demo page
 node dev/build-setup-guide.js         # dev/setup-guide.html: the launch page with copy buttons
-node dev/make-icons.js                # regenerate docs/icons/*.png
+node dev/make-icons.js                # regenerate both apps' icons
 node dev/smoke-test.js                # end-to-end test in headless Chromium (needs Playwright)
+node dev/site-test.js                 # both apps stay separate: ids, scopes, old-address redirect, offline
 node dev/waitlist-server.js           # waiting list: local server + app, to try it with several browser windows
 node dev/waitlist-test.js             # waiting list: two-phone end-to-end test (sync, offline, invite, key reset)
 node dev/build-waitlist-demo.js       # waiting list: dev/waitlist-demo.html, a one-phone demo page
