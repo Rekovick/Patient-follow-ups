@@ -8,8 +8,10 @@
   const DATA_KEY = 'waitlist.data.v1';
   const OUTBOX_KEY = 'waitlist.outbox.v1';
   const PREFS_KEY = 'waitlist.prefs.v1';
+  const THUMB_CACHE = 'waiting-list-thumbs-v1';
   const POLL_MS = 20000;
   const FULL_SYNC_MS = 10 * 60000;
+  const KINDS = { decision: 'Decision', preop: 'Pre-op', postop: 'Post-op' };
 
   const app = document.getElementById('app');
   const overlayRoot = document.getElementById('overlay-root');
@@ -17,16 +19,25 @@
   const S = {
     conf: null,          // {url, key, name, team}
     cases: {},           // id -> case
-    lists: { statuses: ['Waiting', 'Done'], hospitals: [], consultants: [] },
+    lists: { statuses: ['Waiting', 'Done'] },
     lastSync: '',
     lastFull: 0,
     outbox: [],          // [{id, op: 'save'|'remove', fields}]
+    uploads: [],         // [{caseId, kind, ph: {dataUrl, thumb}}] — photos waiting to be sent
+    uploading: false,
+    view: { name: 'list' },
+    depth: 0,
     filter: 'active',
     q: '',
     sync: 'ok',          // ok | syncing | offline | error
     syncing: false,
     joinMsg: '',
     installPrompt: null,
+    thumbs: {},          // fileId -> dataUrl
+    thumbLoading: {},
+    full: {},
+    draftPhotos: { decision: [], preop: [] },
+    viewer: null,
   };
 
   // ---------------------------------------------------------------- storage
@@ -109,6 +120,7 @@
       saveData();
       setSync(S.outbox.length ? 'offline' : 'ok');
       refreshView();
+      runUploads();
     } catch (e) {
       if (e.denied) { leave('This invite link no longer works. Ask a colleague for the new one.'); return; }
       setSync(e.offline ? 'offline' : 'error', e.message);
@@ -159,18 +171,170 @@
   function saveCase(id, fields) {
     const existing = S.cases[id];
     const now = new Date().toISOString();
-    S.cases[id] = Object.assign({}, existing || { id: id, createdAt: now, createdBy: S.conf.name, status: S.lists.statuses[0] }, fields,
+    S.cases[id] = Object.assign({}, existing || { id: id, createdAt: now, createdBy: S.conf.name, status: S.lists.statuses[0], photos: emptyPhotos() }, fields,
       { updatedAt: now, updatedBy: S.conf.name });
     queue({ op: 'save', id: id, fields: fields });
   }
 
   function removeCase(id) {
     delete S.cases[id];
+    S.uploads = S.uploads.filter(u => u.caseId !== id);
     queue({ op: 'remove', id: id });
   }
 
   function newId() {
     return 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  }
+
+  function emptyPhotos() {
+    return { decision: [], preop: [], postop: [] };
+  }
+
+  function photosOf(c) {
+    return Object.assign(emptyPhotos(), (c && c.photos) || {});
+  }
+
+  // ---------------------------------------------------------------- photos
+
+  function readImage(file) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => resolve({ img: img, url: url });
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not read "' + file.name + '". Try a JPG or PNG photo.')); };
+      img.src = url;
+    });
+  }
+
+  function toJpeg(img, max, quality) {
+    const scale = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', quality);
+  }
+
+  /** Resizes photos on the phone before upload, so they go quickly over mobile data. */
+  async function processFiles(files) {
+    const out = [];
+    for (const file of Array.from(files || [])) {
+      try {
+        const r = await readImage(file);
+        out.push({ dataUrl: toJpeg(r.img, 1600, 0.8), thumb: toJpeg(r.img, 320, 0.7) });
+        URL.revokeObjectURL(r.url);
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }
+    return out;
+  }
+
+  function queueUploads(caseId, kind, items) {
+    items.forEach(ph => S.uploads.push({ caseId: caseId, kind: kind, ph: ph }));
+    updateUploadBar();
+    refreshView();
+    runUploads();
+  }
+
+  /** Sends waiting photos one at a time, once their case has reached the server. */
+  async function runUploads() {
+    if (S.uploading || !S.conf) return;
+    S.uploading = true;
+    let sent = 0;
+    try {
+      while (S.uploads.length) {
+        const u = S.uploads[0];
+        if (!S.cases[u.caseId]) { S.uploads.shift(); continue; }
+        if (isPending(u.caseId)) break; // the case itself isn't on the server yet; sync() will call us again
+        try {
+          const c = await api(S.conf, 'uploadPhoto', [u.caseId, u.kind, { dataUrl: u.ph.dataUrl, thumbDataUrl: u.ph.thumb }]);
+          const list = photosOf(c)[u.kind];
+          const added = list[list.length - 1];
+          if (added) rememberThumb(added.thumbId || added.id, u.ph.thumb);
+          if (!isPending(c.id)) S.cases[c.id] = c;
+          S.uploads.shift();
+          sent++;
+          saveData();
+        } catch (e) {
+          if (e.offline) break;
+          if (e.denied) { leave('This invite link no longer works. Ask a colleague for the new one.'); return; }
+          S.uploads.shift();
+          toast('A photo was not saved: ' + e.message, 'error');
+        }
+        updateUploadBar();
+        refreshView();
+      }
+    } finally {
+      S.uploading = false;
+      updateUploadBar();
+      refreshView();
+    }
+    if (sent && !S.uploads.length) toast(sent + ' photo' + (sent > 1 ? 's' : '') + ' uploaded');
+  }
+
+  function updateUploadBar() {
+    let bar = document.getElementById('upload-bar');
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'upload-bar';
+      bar.setAttribute('role', 'status');
+      document.body.appendChild(bar);
+    }
+    const n = S.uploads.length;
+    bar.hidden = !n;
+    const waiting = n && (S.sync === 'offline' || !S.uploading);
+    bar.innerHTML = n ? '<span class="dot"></span>' + (waiting ? n + ' photo' + (n > 1 ? 's' : '') + ' waiting for signal' : 'Uploading ' + n + ' photo' + (n > 1 ? 's' : '') + '… keep the app open') : '';
+  }
+
+  // Thumbnails are kept in the phone's cache storage, so they show instantly next time, even offline.
+  function cacheKey(id) {
+    return new Request(location.href.split('#')[0] + '__thumb/' + encodeURIComponent(id));
+  }
+
+  function rememberThumb(id, dataUrl) {
+    S.thumbs[id] = dataUrl;
+    try {
+      if (window.caches) caches.open(THUMB_CACHE).then(c => c.put(cacheKey(id), new Response(dataUrl))).catch(() => {});
+    } catch (e) { /* no cache storage here */ }
+  }
+
+  async function cachedThumb(id) {
+    try {
+      if (!window.caches) return null;
+      const hit = await (await caches.open(THUMB_CACHE)).match(cacheKey(id));
+      return hit ? await hit.text() : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function hydrateThumbs() {
+    const imgs = Array.from(document.querySelectorAll('img[data-fid]'));
+    const need = [];
+    for (const img of imgs) {
+      const id = img.dataset.fid;
+      if (S.thumbs[id]) { if (img.getAttribute('src') !== S.thumbs[id]) img.src = S.thumbs[id]; continue; }
+      if (S.thumbLoading[id] || need.indexOf(id) >= 0) continue;
+      const cached = await cachedThumb(id);
+      if (cached) { S.thumbs[id] = cached; img.src = cached; } else need.push(id);
+    }
+    if (!need.length || !S.conf) return;
+    need.forEach(id => { S.thumbLoading[id] = true; });
+    for (let i = 0; i < need.length; i += 12) {
+      const chunk = need.slice(i, i + 12);
+      try {
+        const map = await api(S.conf, 'getPhotoData', [chunk]);
+        chunk.forEach(id => {
+          if (map[id]) rememberThumb(id, map[id]);
+          document.querySelectorAll('img[data-fid="' + id + '"]').forEach(img => { if (map[id]) img.src = map[id]; });
+        });
+      } catch (e) { /* offline: tried again on the next render */ }
+      chunk.forEach(id => { delete S.thumbLoading[id]; });
+    }
   }
 
   // ---------------------------------------------------------------- helpers
@@ -222,6 +386,11 @@
     return d === 1 ? 'yesterday' : d + ' days ago';
   }
 
+  function waitingText(c) {
+    const d = daysSince(c.createdAt);
+    return d ? d + (d === 1 ? ' day' : ' days') + ' waiting' : 'added today';
+  }
+
   const TONES = ['amber', 'blue', 'violet', 'teal', 'orange', 'slate'];
   function doneStatus() {
     const st = S.lists.statuses;
@@ -240,6 +409,16 @@
     menu: '<circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/>',
     list: '<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1.5"/><circle cx="4.5" cy="12" r="1.5"/><circle cx="4.5" cy="18" r="1.5"/>',
     share: '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.6 13.5 6.8 4M15.4 6.5l-6.8 4"/>',
+    back: '<path d="m15 18-6-6 6-6"/>',
+    edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/>',
+    camera: '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>',
+    image: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/>',
+    x: '<path d="M18 6 6 18M6 6l12 12"/>',
+    trash: '<path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>',
+    left: '<path d="m15 18-6-6 6-6"/>',
+    right: '<path d="m9 18 6-6-6-6"/>',
+    external: '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14 21 3"/>',
+    lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
   };
   const WA = 'M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2.05 22l5.25-1.38a9.9 9.9 0 0 0 4.74 1.21c5.46 0 9.91-4.45 9.91-9.91S17.5 2 12.04 2zm5.8 14.03c-.25.69-1.44 1.32-1.98 1.4-.51.08-1.15.11-1.86-.12-.43-.14-.98-.32-1.68-.62-2.96-1.28-4.89-4.26-5.04-4.46-.15-.2-1.2-1.6-1.2-3.05s.76-2.16 1.03-2.46c.27-.3.59-.37.79-.37h.57c.18 0 .43-.07.67.51.25.59.84 2.05.91 2.2.07.15.12.32.02.52-.1.2-.15.32-.3.49-.15.17-.31.39-.45.52-.15.15-.3.31-.13.61.17.3.77 1.27 1.65 2.06 1.13 1.01 2.09 1.32 2.39 1.47.3.15.47.12.64-.07.17-.2.74-.86.94-1.16.2-.3.39-.25.66-.15.27.1 1.72.81 2.02.96.3.15.49.22.57.35.07.12.07.71-.18 1.4z';
   function icon(name) {
@@ -256,15 +435,50 @@
     toastTimer = setTimeout(() => { el.className = ''; }, kind === 'error' ? 4500 : 2000);
   }
 
+  // ---------------------------------------------------------------- navigation
+
+  function go(view) {
+    S.view = view;
+    try { history.pushState(view, ''); S.depth++; } catch (e) { /* no history */ }
+    closeSheets();
+    render();
+    window.scrollTo(0, 0);
+  }
+
+  function back() {
+    if (S.depth > 0) history.back();
+    else { S.view = { name: 'list' }; render(); }
+  }
+
+  window.addEventListener('popstate', e => {
+    S.depth = Math.max(0, S.depth - 1);
+    S.view = (e.state && e.state.name) ? e.state : { name: 'list' };
+    closeSheets();
+    closeViewer();
+    render();
+  });
+
   // ---------------------------------------------------------------- views
 
   function render() {
     if (!S.conf) renderJoin();
+    else if (S.view.name === 'case') renderCase(S.view.id);
     else renderMain();
+    hydrateThumbs();
   }
 
+  /** Redraws the current screen after data changed, keeping the scroll position and the search box. */
   function refreshView() {
-    if (S.conf && document.getElementById('list')) renderList();
+    if (!S.conf) return;
+    if (S.view.name === 'case') {
+      const y = window.scrollY;
+      renderCase(S.view.id);
+      window.scrollTo(0, y);
+      hydrateThumbs();
+    } else if (document.getElementById('list')) {
+      renderList();
+    }
+    if (S.viewer) drawViewer();
   }
 
   function renderJoin() {
@@ -315,9 +529,16 @@
     return list.slice().sort((a, b) => (b.urgent - a.urgent) || String(a.createdAt).localeCompare(String(b.createdAt)));
   }
 
+  function queuePositions() {
+    const done = doneStatus();
+    const pos = {};
+    ordered(Object.values(S.cases).filter(c => c.status !== done)).forEach((c, i) => { pos[c.id] = i + 1; });
+    return pos;
+  }
+
   function matchesSearch(c, q) {
     if (!q) return true;
-    const hay = normText([c.name, c.phone, localPhone(c.phone), c.diagnosis, c.hospital, c.consultant, c.status, c.note, c.createdBy].join(' '));
+    const hay = normText([c.name, c.phone, localPhone(c.phone), c.diagnosis, c.status, c.note, c.createdBy].join(' '));
     const digits = q.replace(/[\s+\-()]/g, '');
     if (/^\d{4,}$/.test(digits) && localPhone(c.phone).indexOf(digits.replace(/^(00)?20/, '').replace(/^0/, '')) >= 0) return true;
     return q.split(/\s+/).every(w => hay.indexOf(w) >= 0);
@@ -326,9 +547,7 @@
   function renderList() {
     const all = Object.values(S.cases);
     const done = doneStatus();
-    const active = ordered(all.filter(c => c.status !== done));
-    const pos = {};
-    active.forEach((c, i) => { pos[c.id] = i + 1; });
+    const pos = queuePositions();
     const q = normText(S.q).trim();
     const searched = all.filter(c => matchesSearch(c, q));
     const groups = {
@@ -343,9 +562,9 @@
     const chip = (key, label) => '<button class="chip' + (S.filter === key ? ' on' : '') + '" data-act="filter" data-key="' + esc(key) + '">' +
       esc(label) + ' <b>' + searched.filter(groups[key]).length + '</b></button>';
     document.getElementById('chips').innerHTML =
-      chip('active', 'All') + chip('urgent', 'Urgent') + chip('mine', 'Added by me') +
+      chip('active', 'Active') + chip('urgent', 'Urgent') + chip('mine', 'Added by me') +
       S.lists.statuses.map(s => chip('s:' + s, s)).join('');
-    document.getElementById('count').textContent = active.length + ' waiting' + (S.conf.name ? ' · you are ' + S.conf.name : '');
+    document.getElementById('count').textContent = Object.keys(pos).length + ' waiting · you are ' + S.conf.name;
 
     const list = document.getElementById('list');
     if (!all.length) {
@@ -359,29 +578,96 @@
     list.innerHTML = shown.map(c => cardHtml(c, pos[c.id])).join('');
   }
 
-  function cardHtml(c, position) {
-    const meta = [c.diagnosis, c.hospital, c.consultant].filter(Boolean).map(esc).join(' · ');
-    const waited = daysSince(c.createdAt);
+  function photoCount(c) {
+    const p = photosOf(c);
+    return p.decision.length + p.preop.length + p.postop.length + S.uploads.filter(u => u.caseId === c.id).length;
+  }
+
+  function contactRow(c) {
     const phone = localPhone(c.phone);
-    return '<article class="card' + (c.urgent ? ' urgent' : '') + (isPending(c.id) ? ' pending' : '') + '" data-act="edit" data-id="' + esc(c.id) + '">' +
+    if (!phone) return '';
+    return '<div class="bottom"><a class="phone" href="tel:+' + intlPhone(phone) + '" dir="ltr">' + esc(prettyPhone(phone)) + '</a>' +
+      '<a class="round call" href="tel:+' + intlPhone(phone) + '" aria-label="Call">' + icon('phone') + '</a>' +
+      '<a class="round wa" href="https://wa.me/' + intlPhone(phone) + '" target="_blank" rel="noopener" aria-label="WhatsApp">' + icon('wa') + '</a></div>';
+  }
+
+  function cardHtml(c, position) {
+    const n = photoCount(c);
+    return '<article class="card' + (c.urgent ? ' urgent' : '') + (isPending(c.id) ? ' pending' : '') + '" data-act="open" data-id="' + esc(c.id) + '">' +
       '<div class="top"><span class="pos">' + (position ? '#' + position : '') + '</span>' +
         '<h3 dir="auto">' + esc(c.name) + '</h3>' +
         (c.urgent ? '<span class="tag-urgent">Urgent</span>' : '') +
         '<button class="badge tone-' + tone(c.status) + '" data-act="status" data-id="' + esc(c.id) + '">' + esc(c.status) + '</button></div>' +
-      (meta ? '<div class="meta" dir="auto">' + meta + '</div>' : '') +
+      (c.diagnosis ? '<div class="meta" dir="auto">' + esc(c.diagnosis) + '</div>' : '') +
       (c.note ? '<div class="note" dir="auto">' + esc(c.note) + '</div>' : '') +
-      (phone
-        ? '<div class="bottom"><a class="phone" href="tel:+' + intlPhone(phone) + '" dir="ltr">' + esc(prettyPhone(phone)) + '</a>' +
-          '<a class="round call" href="tel:+' + intlPhone(phone) + '" aria-label="Call">' + icon('phone') + '</a>' +
-          '<a class="round wa" href="https://wa.me/' + intlPhone(phone) + '" target="_blank" rel="noopener" aria-label="WhatsApp">' + icon('wa') + '</a></div>'
-        : '') +
-      '<div class="by">Added by ' + esc(c.createdBy || '?') + ' · ' + (waited ? waited + (waited === 1 ? ' day' : ' days') + ' waiting' : 'today') +
+      contactRow(c) +
+      '<div class="by">' + (n ? '<span class="pics">' + icon('camera') + n + '</span>' : '') +
+        'Added by ' + esc(c.createdBy || '?') + ' · ' + waitingText(c) +
         (isPending(c.id) ? ' · <b>not sent yet</b>' : '') + '</div>' +
       '</article>';
   }
 
+  function renderCase(id) {
+    const c = S.cases[id];
+    if (!c) {
+      app.innerHTML = '<header class="head"><div class="head-row"><button class="icon-btn" data-act="back" aria-label="Back">' + icon('back') + '</button><h1>Case</h1></div></header>' +
+        '<div class="empty"><p><b>This case is no longer on the list</b></p><p class="small">Someone may have deleted it.</p></div>';
+      return;
+    }
+    const done = c.status === doneStatus();
+    const pos = queuePositions()[c.id];
+    app.innerHTML =
+      '<header class="head"><div class="head-row">' +
+        '<button class="icon-btn" data-act="back" aria-label="Back">' + icon('back') + '</button>' +
+        '<h1 dir="auto">' + esc(c.name) + '<small>' + (pos ? '#' + pos + ' on the list · ' : '') + waitingText(c) + '</small></h1>' +
+        '<button class="icon-btn" data-act="edit" data-id="' + esc(c.id) + '" aria-label="Edit">' + icon('edit') + '</button>' +
+      '</div></header>' +
+      '<div class="page">' +
+        '<section class="panel hero' + (c.urgent ? ' urgent' : '') + '">' +
+          '<div class="top"><h2 dir="auto">' + esc(c.name) + '</h2>' + (c.urgent ? '<span class="tag-urgent">Urgent</span>' : '') +
+            '<span class="badge tone-' + tone(c.status) + '">' + esc(c.status) + '</span></div>' +
+          (c.diagnosis ? '<p class="dx" dir="auto">' + esc(c.diagnosis) + '</p>' : '') +
+          (c.note ? '<div class="note" dir="auto">' + esc(c.note) + '</div>' : '') +
+          contactRow(c) +
+        '</section>' +
+        '<section class="panel"><h3>Status</h3><div class="statuses">' + S.lists.statuses.map(s =>
+          '<button class="badge tone-' + tone(s) + (s === c.status ? ' on' : '') + '" data-act="set-status" data-id="' + esc(c.id) + '" data-value="' + esc(s) + '">' + esc(s) + '</button>').join('') +
+        '</div></section>' +
+        photoPanel(c, 'decision') +
+        photoPanel(c, 'preop') +
+        (done ? photoPanel(c, 'postop')
+          : '<section class="panel locked"><h3>' + icon('lock') + 'Post-op photos</h3><p class="small muted">Available once the status is “' + esc(doneStatus()) + '”.</p></section>') +
+        '<section class="panel"><p class="small muted">Added by <b>' + esc(c.createdBy || '?') + '</b> ' + esc(ago(c.createdAt)) +
+          (c.updatedBy ? ' · last change by <b>' + esc(c.updatedBy) + '</b> ' + esc(ago(c.updatedAt)) : '') + '</p>' +
+          '<div class="row"><button class="btn" data-act="edit" data-id="' + esc(c.id) + '">' + icon('edit') + 'Edit details</button>' +
+          '<button class="btn danger" data-act="delete" data-id="' + esc(c.id) + '">' + icon('trash') + 'Delete</button></div></section>' +
+      '</div>';
+  }
+
+  function photoButtons(kind, primary) {
+    return '<div class="photo-actions">' +
+      '<label class="btn file-btn' + (primary ? ' primary' : '') + '">' + icon('camera') + 'Camera<input type="file" accept="image/*" capture="environment" data-photo-kind="' + kind + '"></label>' +
+      '<label class="btn file-btn">' + icon('image') + 'Upload<input type="file" accept="image/*" multiple data-photo-kind="' + kind + '"></label>' +
+      '</div>';
+  }
+
+  function photoPanel(c, kind) {
+    const list = photosOf(c)[kind];
+    const waiting = S.uploads.filter(u => u.caseId === c.id && u.kind === kind);
+    const tiles = list.map((ph, i) => {
+      const fid = ph.thumbId || ph.id;
+      return '<button class="photo" data-act="view-photo" data-kind="' + kind + '" data-index="' + i + '" aria-label="Open photo">' +
+        '<img data-fid="' + esc(fid) + '"' + (S.thumbs[fid] ? ' src="' + esc(S.thumbs[fid]) + '"' : '') + ' alt=""></button>';
+    }).concat(waiting.map(u => '<div class="photo uploading"><img src="' + esc(u.ph.thumb) + '" alt=""><span class="spin"></span></div>'));
+    return '<section class="panel"><h3>' + icon(kind === 'decision' ? 'edit' : 'image') + KINDS[kind] + (kind === 'decision' ? ' photo' : ' photos') +
+      (list.length ? ' <span class="count">' + list.length + '</span>' : '') + '</h3>' +
+      (tiles.length ? '<div class="photos">' + tiles.join('') + '</div>' : '<p class="small muted">No photos yet.</p>') +
+      photoButtons(kind, kind === 'decision' && !list.length) + '</section>';
+  }
+
   function setSync(state, message) {
     S.sync = state;
+    updateUploadBar();
     const el = document.getElementById('sync');
     if (!el) return;
     el.className = 'sync ' + state;
@@ -407,7 +693,7 @@
   }
 
   function closeSheets() {
-    overlayRoot.innerHTML = '';
+    overlayRoot.querySelectorAll('.scrim').forEach(s => s.remove());
   }
 
   function confirmSheet(title, text, ok) {
@@ -421,35 +707,32 @@
     });
   }
 
-  function options(values, current, empty) {
-    const list = values.slice();
-    if (current && list.indexOf(current) < 0) list.push(current);
-    return (empty ? '<option value="">' + esc(empty) + '</option>' : '') +
-      list.map(v => '<option' + (v === current ? ' selected' : '') + '>' + esc(v) + '</option>').join('');
+  function draftPhotosHtml(kind) {
+    const list = S.draftPhotos[kind];
+    return (list.length ? '<div class="photos">' + list.map((ph, i) =>
+      '<div class="photo"><img src="' + esc(ph.thumb) + '" alt=""><button type="button" class="x" data-remove-draft="' + kind + ':' + i + '" aria-label="Remove">' + icon('x') + '</button></div>').join('') + '</div>' : '') +
+      photoButtons(kind, kind === 'decision' && !list.length);
   }
 
   function openForm(id) {
     const c = id ? S.cases[id] : null;
     const v = c || { status: S.lists.statuses[0], urgent: false };
+    if (!c) S.draftPhotos = { decision: [], preop: [] };
     const sheet = openSheet(
       '<h3>' + (c ? 'Edit case' : 'Add case') + '</h3>' +
       '<form data-form="case" data-id="' + esc(id || '') + '">' +
         '<div class="field"><label for="f-name">Patient name</label><input id="f-name" name="name" dir="auto" autocomplete="off" value="' + esc(v.name) + '" required></div>' +
         '<div class="field"><label for="f-phone">Phone</label><input id="f-phone" name="phone" inputmode="tel" dir="ltr" autocomplete="off" placeholder="01xxxxxxxxx" value="' + esc(v.phone) + '"><div id="phone-warn"></div></div>' +
         '<div class="field"><label for="f-dx">Diagnosis / operation</label><input id="f-dx" name="diagnosis" dir="auto" autocomplete="off" value="' + esc(v.diagnosis) + '"></div>' +
-        '<div class="pair">' +
-          '<div class="field"><label for="f-hosp">Hospital</label><select id="f-hosp" name="hospital">' + options(S.lists.hospitals, v.hospital, '—') + '</select></div>' +
-          '<div class="field"><label for="f-cons">Consultant</label><select id="f-cons" name="consultant">' + options(S.lists.consultants, v.consultant, '—') + '</select></div>' +
-        '</div>' +
         '<div class="field"><label>Status</label><div class="statuses">' + S.lists.statuses.map(s =>
           '<button type="button" class="badge tone-' + tone(s) + (s === v.status ? ' on' : '') + '" data-pick-status="' + esc(s) + '">' + esc(s) + '</button>').join('') +
           '</div><input type="hidden" name="status" value="' + esc(v.status) + '"></div>' +
         '<label class="switch"><input type="checkbox" name="urgent"' + (v.urgent ? ' checked' : '') + '> Urgent</label>' +
         '<div class="field"><label for="f-note">Note</label><textarea id="f-note" name="note" dir="auto">' + esc(v.note) + '</textarea></div>' +
-        (c ? '<p class="small muted" style="margin-top:10px">Added by ' + esc(c.createdBy) + ' ' + esc(ago(c.createdAt)) +
-          (c.updatedBy ? ' · last change by ' + esc(c.updatedBy) + ' ' + esc(ago(c.updatedAt)) : '') + '</p>' : '') +
+        (c ? '' :
+          '<div class="field"><label>Decision photo</label><div id="draft-decision">' + draftPhotosHtml('decision') + '</div></div>' +
+          '<div class="field"><label>Pre-op photos (optional)</label><div id="draft-preop">' + draftPhotosHtml('preop') + '</div></div>') +
         '<div class="row"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" type="submit">Save</button></div>' +
-        (c ? '<div class="row"><button type="button" class="btn danger" data-act="delete" data-id="' + esc(id) + '">Delete case</button></div>' : '') +
       '</form>');
     phoneWarning(sheet, v.phone, id);
     if (!c) setTimeout(() => sheet.querySelector('#f-name').focus(), 60);
@@ -474,6 +757,72 @@
         '<button class="badge tone-' + tone(s) + (s === c.status ? ' on' : '') + '" data-act="set-status" data-id="' + esc(id) + '" data-value="' + esc(s) + '">' + esc(s) + '</button>').join('') + '</div>' +
       '<div class="row"><button class="btn" data-close>Close</button></div>');
   }
+
+  // ---------------------------------------------------------------- photo viewer
+
+  function openViewer(caseId, kind, index) {
+    S.viewer = { caseId: caseId, kind: kind, index: index };
+    drawViewer();
+  }
+
+  function closeViewer() {
+    S.viewer = null;
+    const v = overlayRoot.querySelector('.viewer');
+    if (v) v.remove();
+  }
+
+  function drawViewer() {
+    const v = S.viewer;
+    const list = v && S.cases[v.caseId] ? photosOf(S.cases[v.caseId])[v.kind] : [];
+    if (!list.length) { closeViewer(); return; }
+    v.index = Math.max(0, Math.min(v.index, list.length - 1));
+    const ph = list[v.index];
+    const src = S.full[ph.id] || S.thumbs[ph.thumbId || ph.id] || '';
+    let el = overlayRoot.querySelector('.viewer');
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'viewer';
+      overlayRoot.appendChild(el);
+      let x0 = null;
+      el.addEventListener('touchstart', e => { x0 = e.touches[0].clientX; }, { passive: true });
+      el.addEventListener('touchend', e => {
+        if (x0 === null) return;
+        const dx = e.changedTouches[0].clientX - x0;
+        x0 = null;
+        if (Math.abs(dx) > 50) stepViewer(dx < 0 ? 1 : -1);
+      });
+    }
+    el.innerHTML =
+      '<div class="viewer-bar">' +
+        '<button class="icon-btn" data-act="viewer-close" aria-label="Close">' + icon('x') + '</button>' +
+        '<span class="t"><b>' + KINDS[v.kind] + '</b> · ' + (v.index + 1) + ' / ' + list.length + '<br><span class="small">' + esc(ago(ph.at)) + (ph.by ? ' · ' + esc(ph.by) : '') + '</span></span>' +
+        '<a class="icon-btn" href="https://drive.google.com/file/d/' + esc(ph.id) + '/view" target="_blank" rel="noopener" aria-label="Open in Google Drive">' + icon('external') + '</a>' +
+        '<button class="icon-btn" data-act="viewer-delete" aria-label="Delete photo">' + icon('trash') + '</button>' +
+      '</div>' +
+      '<div class="viewer-img">' + (src ? '<img src="' + esc(src) + '" alt="">' : '') +
+        (S.full[ph.id] ? '' : '<span class="spin big"></span>') +
+        (list.length > 1 ? '<button class="round nav prev" data-act="viewer-prev" aria-label="Previous">' + icon('left') + '</button><button class="round nav next" data-act="viewer-next" aria-label="Next">' + icon('right') + '</button>' : '') +
+      '</div>';
+    if (!S.full[ph.id]) {
+      api(S.conf, 'getPhotoData', [[ph.id]]).then(map => {
+        if (map[ph.id]) {
+          S.full[ph.id] = map[ph.id];
+          if (S.viewer && list[S.viewer.index] && list[S.viewer.index].id === ph.id) drawViewer();
+        }
+      }).catch(e => toast(e.offline ? 'The full photo needs a signal.' : e.message, 'error'));
+    }
+  }
+
+  function stepViewer(dir) {
+    const v = S.viewer;
+    if (!v) return;
+    const n = photosOf(S.cases[v.caseId])[v.kind].length;
+    if (n < 2) return;
+    v.index = (v.index + dir + n) % n;
+    drawViewer();
+  }
+
+  // ---------------------------------------------------------------- invite & leaving
 
   function inviteLink() {
     const payload = btoa(unescape(encodeURIComponent(JSON.stringify({ u: S.conf.url, k: S.conf.key, t: S.conf.team }))))
@@ -539,13 +888,18 @@
     S.conf = null;
     S.cases = {};
     S.outbox = [];
+    S.uploads = [];
     S.lastSync = '';
     S.lastFull = 0;
     S.joinMsg = message || '';
+    S.view = { name: 'list' };
     store(CONF_KEY, null);
     store(DATA_KEY, null);
     store(OUTBOX_KEY, null);
+    try { if (window.caches) caches.delete(THUMB_CACHE); } catch (e) { /* none */ }
     closeSheets();
+    closeViewer();
+    updateUploadBar();
     render();
   }
 
@@ -563,6 +917,7 @@
       S.outbox = [];
       S.invite = null;
       S.joinMsg = '';
+      S.view = { name: 'list' };
       store(CONF_KEY, conf);
       saveData();
       render();
@@ -578,6 +933,8 @@
 
   const ACTIONS = {
     add: () => openForm(null),
+    open: el => go({ name: 'case', id: el.dataset.id }),
+    back: () => back(),
     edit: el => openForm(el.dataset.id),
     status: el => openStatus(el.dataset.id),
     'set-status': el => {
@@ -596,13 +953,32 @@
     },
     delete: async el => {
       const c = S.cases[el.dataset.id];
-      if (!c || !await confirmSheet('Delete ' + c.name + '?', 'The case is removed from the list for everyone.', 'Delete')) return;
+      if (!c || !await confirmSheet('Delete ' + c.name + '?', 'The case and its photos are removed for everyone. Photos stay in the Drive trash for 30 days.', 'Delete')) return;
       removeCase(el.dataset.id);
       closeSheets();
+      if (S.view.name === 'case') back();
       toast('Case deleted');
     },
     leave: async () => {
       if (await confirmSheet('Leave this list?', 'The list is removed from this phone only. Nothing is deleted for others.', 'Leave')) leave('');
+    },
+    'view-photo': el => openViewer(S.view.id, el.dataset.kind, Number(el.dataset.index)),
+    'viewer-close': () => closeViewer(),
+    'viewer-prev': () => stepViewer(-1),
+    'viewer-next': () => stepViewer(1),
+    'viewer-delete': async () => {
+      const v = S.viewer;
+      const ph = photosOf(S.cases[v.caseId])[v.kind][v.index];
+      if (!await confirmSheet('Delete this photo?', 'It is removed for everyone and moved to the Drive trash.', 'Delete')) return;
+      try {
+        const c = await api(S.conf, 'deletePhoto', [v.caseId, v.kind, ph.id]);
+        if (c && !isPending(c.id)) S.cases[c.id] = c;
+        saveData();
+        toast('Photo deleted');
+        refreshView();
+      } catch (e) {
+        toast(e.offline ? 'Deleting a photo needs a signal.' : e.message, 'error');
+      }
     },
   };
 
@@ -614,13 +990,37 @@
       form.querySelectorAll('[data-pick-status]').forEach(b => b.classList.toggle('on', b === pick));
       return;
     }
+    const rm = e.target.closest('[data-remove-draft]');
+    if (rm) {
+      const parts = rm.dataset.removeDraft.split(':');
+      S.draftPhotos[parts[0]].splice(Number(parts[1]), 1);
+      document.getElementById('draft-' + parts[0]).innerHTML = draftPhotosHtml(parts[0]);
+      return;
+    }
     const el = e.target.closest('[data-act]');
     if (!el) return;
     const link = e.target.closest('a[href]');
-    if (link && !link.dataset.act) return; // call / WhatsApp links inside a card
+    if (link && !link.dataset.act) return; // call / WhatsApp / Drive links
     e.preventDefault();
     e.stopPropagation();
     if (ACTIONS[el.dataset.act]) ACTIONS[el.dataset.act](el);
+  });
+
+  document.addEventListener('change', async e => {
+    const input = e.target;
+    if (!input.dataset || !input.dataset.photoKind) return;
+    const kind = input.dataset.photoKind;
+    const files = Array.from(input.files || []);
+    input.value = '';
+    if (!files.length) return;
+    const items = await processFiles(files);
+    if (!items.length) return;
+    if (input.closest('form[data-form="case"]')) {
+      S.draftPhotos[kind] = S.draftPhotos[kind].concat(items);
+      document.getElementById('draft-' + kind).innerHTML = draftPhotosHtml(kind);
+    } else if (S.view.name === 'case') {
+      queueUploads(S.view.id, kind, items);
+    }
   });
 
   document.addEventListener('input', e => {
@@ -639,8 +1039,6 @@
         name: name,
         phone: f.phone.value.trim() ? localPhone(f.phone.value) : '',
         diagnosis: f.diagnosis.value.trim(),
-        hospital: f.hospital.value,
-        consultant: f.consultant.value,
         status: f.status.value,
         urgent: f.urgent.checked,
         note: f.note.value.trim(),
@@ -651,11 +1049,19 @@
         const old = S.cases[id] || {};
         Object.keys(fields).forEach(k => { if (fields[k] === old[k] || (!fields[k] && !old[k])) delete fields[k]; });
         if (Object.keys(fields).length) saveCase(id, fields);
+        closeSheets();
+        toast('Saved');
       } else {
-        saveCase(newId(), fields);
+        const newCase = newId();
+        saveCase(newCase, fields);
+        const photos = S.draftPhotos;
+        S.draftPhotos = { decision: [], preop: [] };
+        closeSheets();
+        go({ name: 'case', id: newCase });
+        if (photos.decision.length) queueUploads(newCase, 'decision', photos.decision);
+        if (photos.preop.length) queueUploads(newCase, 'preop', photos.preop);
+        toast('Added to the list');
       }
-      closeSheets();
-      toast(id ? 'Saved' : 'Added to the list');
     } else if (form.dataset.form === 'join') {
       const invite = S.invite || parseInvite(f.link && f.link.value);
       const name = f.name.value.trim();
@@ -677,6 +1083,13 @@
     }
   });
 
+  document.addEventListener('keydown', e => {
+    if (!S.viewer) return;
+    if (e.key === 'Escape') closeViewer();
+    if (e.key === 'ArrowLeft') stepViewer(-1);
+    if (e.key === 'ArrowRight') stepViewer(1);
+  });
+
   window.addEventListener('hashchange', () => {
     const inv = parseInvite(location.hash);
     if (!inv) return;
@@ -690,7 +1103,13 @@
   window.addEventListener('beforeinstallprompt', e => {
     e.preventDefault();
     S.installPrompt = e;
-    if (S.conf) render();
+    if (S.conf && S.view.name === 'list') render();
+  });
+
+  window.addEventListener('beforeunload', e => {
+    if (!S.uploads.length) return;
+    e.preventDefault();
+    e.returnValue = '';
   });
 
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') sync(); });
@@ -700,7 +1119,7 @@
 
   function init() {
     const inv = parseInvite(location.hash);
-    if (inv) history.replaceState(null, '', location.pathname + location.search);
+    try { history.replaceState({ name: 'list' }, '', location.pathname + location.search); } catch (e) { /* no history */ }
     S.conf = load(CONF_KEY, null);
     const data = load(DATA_KEY, null);
     if (data) Object.assign(S, { cases: data.cases || {}, lists: data.lists || S.lists, lastSync: data.lastSync || '', lastFull: data.lastFull || 0 });

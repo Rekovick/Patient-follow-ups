@@ -149,7 +149,11 @@ A separate, simpler app for the whole department's surgery waiting list, at
   It keeps working with no signal; changes wait on the phone ("2 to send") and go out when the signal returns.
 - Ordered like a waiting list: **urgent** first, then whoever has waited longest (#1, #2…). Every case has **Call** and
   **WhatsApp** buttons (+20 added automatically), plus who added it and how many days it has waited.
-- Filters (All, Urgent, Added by me, each status), Arabic-aware search, duplicate-phone warning, and edits that only send the
+- Each case has its own page with **Decision**, **Pre-op** and **Post-op** photos (Post-op once Done), like the follow-up
+  app: camera or upload, resized on the phone, uploaded in the background, full-screen viewer. Photos are kept in a Drive
+  folder per case, and thumbnails are saved on the phone so they show instantly, even offline.
+- Light theme only.
+- Filters (Active, Urgent, Added by me, each status), Arabic-aware search, duplicate-phone warning, and edits that only send the
   changed fields, so two people changing different things on the same case don't overwrite each other.
 
 **Server:** `waitlist-server/Code.gs`, a separate Apps Script project, ideally in a department Google account. Run `setup`

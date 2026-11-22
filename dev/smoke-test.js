@@ -130,7 +130,13 @@ function assert(cond, msg) {
   await page.click('.photo >> nth=0');
   await page.waitForSelector('.viewer img');
   await shot('09-viewer');
-  await page.click('[data-act="viewer-close"]');
+  // Deleting from the viewer: its question must open above the viewer, where it can be tapped.
+  const photosBefore = await page.locator('.photo img').count();
+  await page.click('[data-act="viewer-delete"]');
+  await page.click('.sheet [data-ok]');
+  // It was the only decision photo, so the viewer closes by itself.
+  await page.waitForFunction(n => !document.querySelector('.viewer') && document.querySelectorAll('.photo img').length === n - 1, photosBefore);
+  assert(true, 'a photo can be deleted from the full-screen viewer');
 
   await page.click('.contact [data-act="templates"]');
   await page.waitForSelector('.sheet .template');
@@ -150,7 +156,7 @@ function assert(cond, msg) {
   });
   assert(sheetRow.phone === '01055554444', 'phone stored with leading zero');
   assert(sheetRow.status === 'Done' && sheetRow.cls === 'Trauma', 'status + classification stored');
-  assert(sheetRow.photos === 7 && sheetRow.items === 3, 'photos + anesthesia stored');
+  assert(sheetRow.photos === 6 && sheetRow.items === 3, 'photos + anesthesia stored');
 
   console.log('Settings');
   await page.click('[data-act="settings"]');

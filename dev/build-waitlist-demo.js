@@ -19,17 +19,17 @@ const seed = `
   if (!JSON.parse(doPost({ postData: { contents: JSON.stringify({ key: key, fn: 'sync', args: [''] }) } }).getContent()).result.cases.length) {
     const ago = d => new Date(Date.now() - d * 864e5).toISOString();
     [
-      ['Hoda Samir', '01122334455', 'Meningioma', 'El Sahel', 'Dr Alaa Ahmed', 'Labs', true, 'MRI booked Sunday', 'Dr Sara', 9],
-      ['Mahmoud Ali', '01012345678', 'L4-L5 disc prolapse', 'El Mabara', 'Dr Ahmed Elghity', 'Waiting', false, '', 'Dr Ahmed', 21],
-      ['سعاد عبد الله', '01598765432', 'Cervical myelopathy', '15th of May', 'General', 'Paperwork', false, 'Insurance approval pending', 'Dr Omar', 14],
-      ['Karim Fathy', '01234567890', 'Lumbar canal stenosis', 'El Sahel', 'Dr Ahmed Elghity', 'Ready for surgery', false, '', 'Dr Sara', 30],
+      ['Hoda Samir', '01122334455', 'Meningioma', 'Labs', true, 'MRI booked Sunday', 'Dr Sara', 9],
+      ['Mahmoud Ali', '01012345678', 'L4-L5 disc prolapse', 'Waiting', false, '', 'Dr Ahmed', 21],
+      ['سعاد عبد الله', '01598765432', 'Cervical myelopathy', 'Paperwork', false, 'Insurance approval pending', 'Dr Omar', 14],
+      ['Karim Fathy', '01234567890', 'Lumbar canal stenosis', 'Ready for surgery', false, '', 'Dr Sara', 30],
     ].forEach((r, i) => {
-      USER_ = r[8];
-      const c = save_('demo' + i, { name: r[0], phone: r[1], diagnosis: r[2], hospital: r[3], consultant: r[4], status: r[5], urgent: r[6], note: r[7] });
+      USER_ = r[6];
+      const c = save_('demo' + i, { name: r[0], phone: r[1], diagnosis: r[2], status: r[3], urgent: r[4], note: r[5] });
       // Back-date so the demo shows a real queue.
       const sh = SpreadsheetApp.openById(PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID')).getSheetByName('Cases');
       const row = sh.getRange(2, 1, sh.getLastRow() - 1, 1).createTextFinder(c.id).matchEntireCell(true).findNext().getRow();
-      sh.getRange(row, COLUMNS.indexOf('createdAt') + 1).setValues([[ago(r[9])]]);
+      sh.getRange(row, COLUMNS.indexOf('createdAt') + 1).setValues([[ago(r[7])]]);
     });
   }
   try {

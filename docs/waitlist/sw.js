@@ -16,7 +16,7 @@ self.addEventListener('install', event => {
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(k => k.indexOf('waiting-list-') === 0 && k !== CACHE).map(k => caches.delete(k))))
+      .then(keys => Promise.all(keys.filter(k => k.indexOf('waiting-list-shell-') === 0 && k !== CACHE).map(k => caches.delete(k))))
       .then(() => self.clients.claim()));
 });
 

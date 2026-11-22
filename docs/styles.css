@@ -357,8 +357,9 @@
   .savebar .inner span { flex: 1; font-size: 13px; color: var(--muted); }
 
   /* ---------- Overlays ---------- */
+  /* Above the photo viewer (60), so its "Delete this photo?" question can be answered. */
   .scrim {
-    position: fixed; inset: 0; z-index: 50; background: rgba(8, 12, 16, .5);
+    position: fixed; inset: 0; z-index: 65; background: rgba(8, 12, 16, .5);
     display: flex; align-items: flex-end; justify-content: center; animation: fade .15s ease;
   }
   @keyframes fade { from { opacity: 0; } }

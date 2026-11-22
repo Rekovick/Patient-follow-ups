@@ -29,13 +29,13 @@ ${style}
 
 <main>
   <h1>Launch the Department Waiting List</h1>
-  <p class="lede">One shared list for the whole department. Anyone you send the link to installs it on their phone, adds cases, and sees everyone else's changes within seconds. Calls and WhatsApp are one tap away.</p>
+  <p class="lede">One shared list for the whole department. Anyone you send the link to installs it on their phone, adds cases with their decision, pre-op and post-op photos, and sees everyone else's changes within seconds. Calls and WhatsApp are one tap away.</p>
   <div class="meta"><span class="pill">About 10 minutes, once</span><span class="pill">Steps 1–5 on a computer</span><span class="pill">Separate from your own follow-up app</span></div>
   <div class="progress"><span id="prog-text">0 of 7 steps done</span><div class="bar"><span id="prog-bar"></span></div></div>
 
   <ol class="steps">
     <li class="step" data-step="1"><span class="num"></span><h2>Choose the owner account</h2><div class="body">
-      <p>The list is saved in the Google Drive of whoever does steps 2–4. A department Gmail account (for example <i>neurosurgery.dept@gmail.com</i>) is best, because the list then belongs to the department rather than to one doctor. Your own account also works.</p>
+      <p>The list and its photos are saved in the Google Drive of whoever does steps 2–4. A department Gmail account (for example <i>neurosurgery.dept@gmail.com</i>) is best, because the list then belongs to the department rather than to one doctor. Your own account also works.</p>
       <label class="tick"><input type="checkbox" id="s1"> Signed in with the owner account</label></div></li>
 
     <li class="step" data-step="2"><span class="num"></span><h2>Create the server</h2><div class="body">
@@ -83,12 +83,13 @@ ${style}
     <div><h2>How it works day to day</h2>
       <ul>
         <li>The list is ordered like a real waiting list: <b>urgent</b> cases first, then whoever has waited longest. Each card shows its place (#1, #2…).</li>
-        <li>Tap a case to edit it, or tap its status to change only that. Your name is recorded on everything you add or change.</li>
+        <li>Tap a case to open its page: details, status, and <b>Decision</b>, <b>Pre-op</b> and <b>Post-op</b> photos (Post-op once the case is Done). Take photos with the camera or upload them; they upload in the background. Tap a photo to see it full screen.</li>
+        <li>Tap a status badge on the list to change only that. Your name is recorded on everything you add or change.</li>
         <li>Phones sync about every 20 seconds while the app is open, and right after any change. Tap <b>Synced</b> at the top to sync now.</li>
-        <li>With no signal you can still add and edit. The top shows <b>"2 to send"</b> until the phone is back online.</li>
+        <li>With no signal you can still add and edit. The top shows <b>"2 to send"</b>, and photos wait with <b>"waiting for signal"</b>, until the phone is back online. Keep the app open until the photos are sent.</li>
       </ul></div>
     <div><h2>Changing the choices</h2>
-      <p>Statuses, hospitals and consultants are in the <b>Lists</b> tab of the <i>Department Waiting List — Data</i> sheet (in the owner's Google Drive). Edit them there; phones pick up the change within 10 minutes. The <b>Cases</b> tab holds every case, so you can sort, filter or download it.</p></div>
+      <p>The statuses are in the <b>Lists</b> tab of the <i>Department Waiting List — Data</i> sheet, in the owner's Google Drive (<i>Department Waiting List</i> folder). Edit them there; phones pick up the change within 10 minutes. The <b>Cases</b> tab holds every case, and the <b>Photos</b> folder holds a folder of photos per case.</p></div>
   </section>
 </main>
 
